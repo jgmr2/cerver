@@ -17,17 +17,19 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          # Sustituye con tus secretos de GitHub
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Paso opcional: Limpiar el mensaje del commit (quitar espacios o caracteres raros)
+      - name: Get commit message
+        id: vars
+        run: echo "commit_msg=$(echo ${GITHUB_EVENT_PULL_REQUEST_TITLE:-${{ github.event.head_commit.message }}} | tr -dc '[:alnum:]\n\r' | tr ' ' '-' | cut -c1-50)" >> $GITHUB_OUTPUT
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          # Cambia 'tu-usuario' por tu nombre en Docker Hub
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cerver:latest
-          # Esto acelera las compilaciones futuras
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/cerver:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/cerver:${{ github.sha }}
