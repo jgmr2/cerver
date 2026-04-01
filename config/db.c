@@ -1,55 +1,47 @@
 #include "db.h"
 #include <stdio.h>
-#include <stdlib.h> // Para malloc y free
+#include <stdlib.h>
 
-PGconn *db_pool[POOL_SIZE];
-unsigned int pool_index = 0;
+db_conn_t db_pool[POOL_SIZE];
 
-void init_db() {
-    const char *conn_info = "host=127.0.0.1 dbname=db_pruebas user=ninja password=12345";
+static inline void on_db_readable(uv_poll_t* h, int s, int e) {
+    db_conn_t *ctx = (db_conn_t *)h->data;
+    if (!PQconsumeInput(ctx->conn)) return (void)fprintf(stderr, "Err BD: %s\n", PQerrorMessage(ctx->conn));
+    if (PQisBusy(ctx->conn)) return;
+    
+    PGresult *res, *f_res = NULL;
+    while ((res = PQgetResult(ctx->conn))) { f_res ? PQclear(f_res) : (void)0; f_res = res; }
+    
+    uv_poll_stop(h);
+    f_res ? (ctx->on_success(ctx->client_stream, f_res), PQclear(f_res)) : (void)0;
+    ctx->is_busy = 0;
+}
 
+void init_db(uv_loop_t *loop) {
+    const char *env = getenv("DATABASE_URL");
+    env ? printf("🔌 Iniciando pool ASYNC puro...\n") : (fprintf(stderr, "🚨 Sin URL\n"), exit(1), 0);
+    
     for (int i = 0; i < POOL_SIZE; i++) {
-        db_pool[i] = PQconnectdb(conn_info);
-
-        if (PQstatus(db_pool[i]) != CONNECTION_OK) {
-            fprintf(stderr, "❌ Error en pool[%d]: %s", i, PQerrorMessage(db_pool[i]));
-        } else {
-            printf("✅ Conexión pool[%d] establecida con éxito.\n", i);
-        }
+        db_pool[i].conn = PQconnectdb(env);
+        PQstatus(db_pool[i].conn) == CONNECTION_OK ? (
+            PQsetnonblocking(db_pool[i].conn, 1),
+            uv_poll_init(loop, &db_pool[i].poll_handle, PQsocket(db_pool[i].conn)),
+            db_pool[i].poll_handle.data = &db_pool[i],
+            db_pool[i].is_busy = 0,
+            (void)printf("✅ pool[%d] OK\n", i)
+        ) : (fprintf(stderr, "❌ Err: %s\n", PQerrorMessage(db_pool[i].conn)), exit(1), 0);
     }
 }
 
-// --- Implementación de Utilidades Asíncronas ---
-
-// Función estática: solo visible dentro de db.c
-static void generic_db_worker(uv_work_t *req) {
-    struct db_ctx *ctx = (struct db_ctx *)req;
-    ctx->r = PQexec(db_pool[(pool_index++) % POOL_SIZE], ctx->query);
-}
-
-// Función estática: solo visible dentro de db.c
-static void generic_db_done(uv_work_t *req, int status) {
-    struct db_ctx *ctx = (struct db_ctx *)req;
+void db_query_async(uv_stream_t *c, const char *q, db_callback cb) {
+    db_conn_t *ctx = NULL;
+    for (int i = 0; i < POOL_SIZE && !ctx; i++) !db_pool[i].is_busy ? (ctx = &db_pool[i]) : 0;
     
-    // Llamar al controlador
-    ctx->on_success(ctx->c, ctx->r);
-    
-    // Limpieza
-    PQclear(ctx->r);
-    free(ctx);
-}
-
-// La función pública que usarán tus controladores
-void db_query_async(uv_stream_t *c, const char *query, db_callback cb) {
-    struct db_ctx *ctx = malloc(sizeof(*ctx));
-    if (!ctx) {
-        fprintf(stderr, "Error: No se pudo asignar memoria para db_ctx\n");
-        return; // Protección básica contra fallos de memoria
-    }
-    
-    ctx->c = c;
-    ctx->query = query;
-    ctx->on_success = cb;
-    
-    uv_queue_work(c->loop, (uv_work_t *)ctx, generic_db_worker, generic_db_done);
+    !ctx ? cb(c, NULL) : (
+        ctx->is_busy = 1, ctx->client_stream = c, ctx->on_success = cb,
+        // Usamos PQsendQueryParams para pasar el formato 1 (binario) al final
+        PQsendQueryParams(ctx->conn, q, 0, NULL, NULL, NULL, NULL, 1) ? 
+            (void)uv_poll_start(&ctx->poll_handle, UV_READABLE, on_db_readable) 
+            : (void)(fprintf(stderr, "Err: %s\n", PQerrorMessage(ctx->conn)), ctx->is_busy = 0)
+    );
 }
