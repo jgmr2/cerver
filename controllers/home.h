@@ -26,5 +26,3 @@ static inline void api(uv_stream_t *c) {
     // Usamos las constantes definidas en el modelo
     db_query_async(c, QUERY_API_TIME, on_api_success); 
 }
-
-alias gp =
