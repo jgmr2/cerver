@@ -14,7 +14,7 @@ static inline void on_api_success(uv_stream_t *c, PGresult *r) {
         unsigned char *val = (unsigned char *)PQgetvalue(r, 0, 0);
         int len = PQgetlength(r, 0, 0);
         
-        snprintf(j, 256, "{\"data\":\"Binario desde Modelo\", \"bytes\": %d, \"hex\":\"%02x%02x%02x%02x\"}", 
+        snprintf(j, 256, "{\"data\":\"Binario desde Modelo, pequeño cambio para testear deploy automático\", \"bytes\": %d, \"hex\":\"%02x%02x%02x%02x\"}", 
                  len, val[0], val[1], val[2], val[3]);
         send_json(c, j);
     } else {
