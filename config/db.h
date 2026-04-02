@@ -6,7 +6,7 @@
 // (Ajusta la ruta si guardaste events.h en otra carpeta)
 #include "../utils/events.h" 
 
-#define POOL_SIZE 32
+#define POOL_SIZE 128
 
 // 1. Actualizamos la firma del callback para usar ring y client_fd
 typedef void (*db_callback)(struct io_uring*, int, PGresult*);
