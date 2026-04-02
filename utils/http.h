@@ -1,69 +1,208 @@
 #ifndef HTTP_HELPER_H
 #define HTTP_HELPER_H
-#include <uv.h>
+
+#include <liburing.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h> 
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <time.h>
+#include "events.h"
 
-typedef struct { uv_write_t w; char h[512]; } req_t;
+#define INITIAL_READ_BUF_SIZE 4096
 
-static void on_w(uv_write_t *r, int s) {
-    !uv_is_closing((uv_handle_t*)r->handle) ? uv_close((uv_handle_t*)r->handle, (uv_close_cb)free) : (void)0;
-    free(r);
+typedef enum {
+    OP_WRITE_RES,
+    OP_WRITE_HEADER,
+    OP_READ_FILE,
+    OP_WRITE_FILE,
+    OP_CLOSE,
+    OP_TIMEOUT // Nuevo tipo para identificar el evento de tiempo
+} req_type_t;
+
+typedef struct {
+    event_type_t core_type; 
+    req_type_t type;
+    struct io_uring *ring;
+    int client_fd;
+    int file_fd;
+    struct iovec iov[2];
+    char h[512];
+    char buf[8192]; 
+    off_t offset;
+} req_t;
+
+typedef struct {
+    event_type_t type;
+    int client_fd;
+    char buf[INITIAL_READ_BUF_SIZE];
+} initial_read_ctx_t;
+
+// Estructura estática para el timeout (500ms)
+static struct __kernel_timespec timeout_ts = {
+    .tv_sec = 0,
+    .tv_nsec = 6000000000 // 500 millones de nanosegundos = 500ms
+};
+
+static inline struct io_uring_sqe *_get_sqe(struct io_uring *ring) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe) {
+        io_uring_submit(ring);
+        sqe = io_uring_get_sqe(ring);
+    }
+    return sqe;
 }
 
-static inline void send_res_bin(uv_stream_t *c, const char *st, const char *ct, const char *bd, size_t len) {
-    req_t *r = malloc(sizeof(*r));
+// Re-armar lectura con LINKED TIMEOUT de 500ms
+static inline void _rearm_read(struct io_uring *ring, int fd) {
+    initial_read_ctx_t *read_ctx = calloc(1, sizeof(*read_ctx));
+    read_ctx->type = EVENT_HTTP_READ_INITIAL;
+    read_ctx->client_fd = fd;
+    
+    // 1. Preparar el READ
+    struct io_uring_sqe *sqe = _get_sqe(ring);
+    io_uring_prep_read(sqe, fd, read_ctx->buf, INITIAL_READ_BUF_SIZE - 1, 0);
+    sqe->flags |= IOSQE_IO_LINK; // ENLAZAR con el siguiente SQE
+    io_uring_sqe_set_data(sqe, read_ctx);
+
+    // 2. Preparar el TIMEOUT (se ejecutará si el READ no termina)
+    sqe = _get_sqe(ring);
+    // IORING_TIMEOUT_ABS no, usaremos relativo (0)
+    io_uring_prep_timeout(sqe, &timeout_ts, 0, 0);
+    
+    // Usamos un puntero dummy o nulo para el timeout, ya que el fallo del READ 
+    // será capturado por el core_type del read_ctx
+    io_uring_sqe_set_data(sqe, NULL); 
+    
+    io_uring_submit(ring);
+}
+
+static inline void send_res_bin(struct io_uring *ring, int fd, const char *s, const char *t, const char *b, size_t n) {
+    req_t *r = calloc(1, sizeof(*r));
+    if (!r) return;
+    
+    r->core_type = EVENT_HTTP_HELPER;
+    r->type = OP_WRITE_RES;
+    r->ring = ring;
+    r->client_fd = fd;
+    
+    int l = snprintf(r->h, 512, "HTTP/1.1 %s\r\nConnection: keep-alive\r\nContent-Type: %s\r\nContent-Length: %zu\r\n\r\n", s, t, n);
+    
+    r->iov[0].iov_base = r->h;
+    r->iov[0].iov_len = l;
+    r->iov[1].iov_base = (void*)b;
+    r->iov[1].iov_len = n;
+
+    struct io_uring_sqe *sqe = _get_sqe(ring);
+    io_uring_prep_writev(sqe, fd, r->iov, b && n ? 2 : 1, 0);
+    io_uring_sqe_set_data(sqe, r);
+    io_uring_submit(ring);
+}
+
+static inline void send_res(struct io_uring *ring, int fd, const char *s, const char *t, const char *b) {
+    send_res_bin(ring, fd, s, t, b, b ? strlen(b) : 0);
+}
+
+static inline void stream_file(struct io_uring *ring, int fd, const char *p, const char *t) {
+    int ffd = open(p, O_RDONLY);
+    if (ffd < 0) return send_res(ring, fd, "404 Not Found", "text/plain", "404");
+    
+    struct stat st;
+    if (fstat(ffd, &st) < 0) {
+        close(ffd);
+        return send_res(ring, fd, "500 Internal Error", "text/plain", "500");
+    }
+
+    req_t *r = calloc(1, sizeof(*r));
     if (r) {
-        int hl = snprintf(r->h, sizeof(r->h), "HTTP/1.1 %s\r\nConnection: close\r\nContent-Type: %s\r\nContent-Length: %zu\r\n\r\n", st, ct, len);
-        uv_buf_t bufs[2] = { uv_buf_init(r->h, hl < 512 ? hl : 511), uv_buf_init((char*)bd, len) };
-        uv_write((uv_write_t*)r, c, bufs, bd && len > 0 ? 2 : 1, on_w);
+        r->core_type = EVENT_HTTP_HELPER;
+        r->type = OP_WRITE_HEADER;
+        r->ring = ring;
+        r->client_fd = fd;
+        r->file_fd = ffd;
+        r->offset = 0;
+        
+        int l = snprintf(r->h, 512, "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: %s\r\nContent-Length: %zu\r\n\r\n", t, (size_t)st.st_size);
+        r->iov[0].iov_base = r->h;
+        r->iov[0].iov_len = l;
+        
+        struct io_uring_sqe *sqe = _get_sqe(ring);
+        io_uring_prep_writev(sqe, fd, r->iov, 1, 0);
+        io_uring_sqe_set_data(sqe, r);
+        io_uring_submit(ring);
+    } else {
+        close(ffd);
     }
 }
 
-static inline void send_res(uv_stream_t *c, const char *st, const char *ct, const char *bd) {
-    send_res_bin(c, st, ct, bd, bd ? strlen(bd) : 0);
-}
-typedef struct {
-    uv_write_t w; uv_fs_t req;
-    uv_file fd; uv_os_fd_t sock;
-    int64_t off; size_t sz; char h[512];
-} file_req_t;
+static inline void http_helper_handle_cqe(struct io_uring_cqe *cqe) {
+    // Si el data es NULL, es el CQE del timeout que se completó o canceló
+    if (!io_uring_cqe_get_data(cqe)) return;
 
-static void on_fs(uv_fs_t *req) {
-    file_req_t *r = req->data;
-    req->result > 0 && (r->off += req->result) < r->sz ? 
-        (uv_fs_req_cleanup(req), uv_fs_sendfile(req->loop, req, (uv_file)r->sock, r->fd, r->off, r->sz - r->off, on_fs)) :
-        (uv_fs_req_cleanup(req), uv_fs_close(req->loop, req, r->fd, NULL), !uv_is_closing((uv_handle_t*)r->w.handle) ? uv_close((uv_handle_t*)r->w.handle, (uv_close_cb)free) : free(r));
+    req_t *r = (req_t *)io_uring_cqe_get_data(cqe);
+    struct io_uring *ring = r->ring;
+
+    // Si cqe->res < 0, incluye el caso de timeout expirado (-ETIME)
+    if (cqe->res < 0) {
+        if (r->type != OP_CLOSE && r->file_fd > 0) close(r->file_fd);
+        goto force_close;
+    }
+
+    switch (r->type) {
+        case OP_WRITE_RES:
+            _rearm_read(ring, r->client_fd);
+            free(r);
+            break;
+
+        case OP_WRITE_HEADER:
+        case OP_WRITE_FILE:
+            {
+                struct io_uring_sqe *sqe = _get_sqe(ring);
+                r->type = OP_READ_FILE;
+                io_uring_prep_read(sqe, r->file_fd, r->buf, sizeof(r->buf), r->offset);
+                io_uring_sqe_set_data(sqe, r);
+                io_uring_submit(ring);
+            }
+            break;
+
+        case OP_READ_FILE:
+            if (cqe->res == 0) { 
+                close(r->file_fd);
+                r->file_fd = -1;
+                _rearm_read(ring, r->client_fd);
+                free(r);
+            } else {
+                int bytes_read = cqe->res;
+                r->offset += bytes_read;
+                struct io_uring_sqe *sqe = _get_sqe(ring);
+                r->type = OP_WRITE_FILE;
+                io_uring_prep_write(sqe, r->client_fd, r->buf, bytes_read, 0);
+                io_uring_sqe_set_data(sqe, r);
+                io_uring_submit(ring);
+            }
+            break;
+
+        case OP_CLOSE:
+            free(r);
+            break;
+    }
+    return;
+
+force_close:
+    if (r->type != OP_CLOSE) {
+        struct io_uring_sqe *sqe = _get_sqe(ring);
+        r->type = OP_CLOSE;
+        io_uring_prep_close(sqe, r->client_fd);
+        io_uring_sqe_set_data(sqe, r);
+        io_uring_submit(ring);
+    }
 }
 
-static void on_h(uv_write_t *w, int s) {
-    file_req_t *r = (file_req_t*)w; r->req.data = r;
-    s == 0 ? uv_fs_sendfile(w->handle->loop, &r->req, (uv_file)r->sock, r->fd, r->off, r->sz, on_fs) : 
-             (uv_fs_close(w->handle->loop, &r->req, r->fd, NULL), !uv_is_closing((uv_handle_t*)w->handle) ? uv_close((uv_handle_t*)w->handle, (uv_close_cb)free) : free(r));
-}
-
-static inline void stream_file(uv_stream_t *c, const char *path, const char *ct) {
-    uv_fs_t op, st; 
-    uv_file fd = uv_fs_open(c->loop, &op, path, O_RDONLY, 0, NULL);
-    if (fd < 0) { send_res(c, "404 Not Found", "text/plain", "Archivo no encontrado"); return; }
-    uv_fs_stat(c->loop, &st, path, NULL);
-    
-    file_req_t *r = malloc(sizeof(*r));
-    if (r) {
-        r->fd = fd; r->sz = st.statbuf.st_size; r->off = 0;
-        uv_fileno((uv_handle_t*)c, &r->sock); 
-        int hl = snprintf(r->h, sizeof(r->h), "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: %s\r\nContent-Length: %zu\r\n\r\n", ct, r->sz);
-        uv_write(&r->w, c, &(uv_buf_t){r->h, hl < 512 ? hl : 511}, 1, on_h); 
-    } else uv_fs_close(c->loop, &op, fd, NULL);
-    
-    uv_fs_req_cleanup(&op); uv_fs_req_cleanup(&st);
-}
-
-#define send_html(c, b) send_res(c, "200 OK", "text/html; charset=utf-8", b)
-#define send_json(c, b) send_res(c, "200 OK", "application/json; charset=utf-8", b)
-#define send_text(c, b) send_res(c, "200 OK", "text/plain; charset=utf-8", b)
-#define send_404(c)     send_res(c, "404 Not Found", "text/plain; charset=utf-8", "404")
+#define send_html(ring, fd, b) send_res(ring, fd, "200 OK", "text/html; charset=utf-8", b)
+#define send_json(ring, fd, b) send_res(ring, fd, "200 OK", "application/json", b)
+#define send_text(ring, fd, b) send_res(ring, fd, "200 OK", "text/plain", b)
+#define send_404(ring, fd)     send_res(ring, fd, "404 Not Found", "text/plain", "404")
 
 #endif

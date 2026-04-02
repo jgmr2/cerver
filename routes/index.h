@@ -1,21 +1,34 @@
 #ifndef ROUTES_H
 #define ROUTES_H
+
+#include <liburing.h>
+#include <string.h>
+
 #include "../controllers/home.h"
 
-typedef struct { char *path; void (*handler)(uv_stream_t *); } Route;
+typedef struct { 
+    const char *p; 
+    void (*h)(struct io_uring *, int); 
+} Route;
 
-Route router_map[] = {
-    {"/api",       api}
+// Puedes agregar tus demás rutas aquí
+Route rs[] = {
+    {"/api", api},
+    {"/status", status},
+    {"/", home}
 };
 
-void router(uv_stream_t *c, char *data) {
-    char *p = strchr(data, ' ') + 1, *e = strchr(p, ' ');
-    if (e) *e = '\0'; 
-    for (int i = 0; i < sizeof(router_map)/sizeof(Route); i++) {
-        if (strcmp(p, router_map[i].path) == 0) {
-            return router_map[i].handler(c);
+// El router ahora recibe la ruta limpia directamente (ej. "/api")
+void router(struct io_uring *ring, int client_fd, const char *path) {
+    // Buscamos coincidencia exacta en nuestro arreglo de rutas
+    for (size_t i = 0; i < sizeof(rs)/sizeof(Route); i++) {
+        if (!strcmp(path, rs[i].p)) {
+            return rs[i].h(ring, client_fd);
         }
     }
-    error404(c);
+    
+    // Si ninguna coincide, lanzamos 404
+    error404(ring, client_fd);
 }
+
 #endif

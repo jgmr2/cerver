@@ -1,18 +1,36 @@
 services:
   db:
     image: postgres:16-alpine
+    # COMANDO DE TUNEO CRÍTICO
+    command: [
+      "postgres",
+      "-c", "max_connections=500",       # Subimos de 100 a 2000
+      "-c", "shared_buffers=1GB",         # Aumenta según tu RAM (25% de la RAM total)
+      "-c", "effective_cache_size=3GB",   # 75% de la RAM total
+      "-c", "work_mem=16MB",              # RAM por cada operación de ordenamiento
+      "-c", "maintenance_work_mem=256MB", 
+      "-c", "min_wal_size=1GB",
+      "-c", "max_wal_size=4GB"
+    ]
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - pg_socket:/var/run/postgresql  # Aquí se crea el archivo .s.PGSQL.5432
+      - pg_socket:/var/run/postgresql
+    # AJUSTES DE KERNEL PARA LA DB
+    sysctls:
+      - net.core.somaxconn=4096           # Mayor cola de conexiones TCP
+    ulimits:
+      nofile:
+        soft: 65536                       # Permite miles de archivos abiertos
+        hard: 65536
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 5s
+      interval: 2s                        # Más rápido para desarrollo
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
 
   backend:
@@ -22,18 +40,21 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Corregido: Sin espacios y usando tus variables exactas
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@/${POSTGRES_DB}?host=/var/run/postgresql
-      - UV_THREADPOOL_SIZE=100
+    ulimits:
+      memlock: -1
+      nofile:                             # EL BACKEND TAMBIÉN NECESITA ESTO
+        soft: 65536
+        hard: 65536
+    security_opt:
+      - seccomp:unconfined
     volumes:
-      - pg_socket:/var/run/postgresql  # El backend lee el archivo aquí
+      - pg_socket:/var/run/postgresql
     depends_on:
       db:
-        condition: service_healthy # Espera a que el healthcheck de 'db' pase
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   pgdata:
-    name: postgres_data_simple
   pg_socket:
-    name: cerver_pg_socket
