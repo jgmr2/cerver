@@ -1,34 +1,15 @@
-#ifndef ROUTES_H
-#define ROUTES_H
+#ifndef ROUTES_INDEX_H
+#define ROUTES_INDEX_H
 
-#include <liburing.h>
-#include <string.h>
-
+#include "../utils/http/router.h"
+// Importamos los controladores que vayamos creando
+#include "../controllers/sakila.h"
 #include "../controllers/home.h"
 
-typedef struct { 
-    const char *p; 
-    void (*h)(struct io_uring *, int); 
-} Route;
-
-// Puedes agregar tus demás rutas aquí
-Route rs[] = {
-    {"/api", api},
-    {"/status", status},
-    {"/", home}
-};
-
-// El router ahora recibe la ruta limpia directamente (ej. "/api")
-void router(struct io_uring *ring, int client_fd, const char *path) {
-    // Buscamos coincidencia exacta en nuestro arreglo de rutas
-    for (size_t i = 0; i < sizeof(rs)/sizeof(Route); i++) {
-        if (!strcmp(path, rs[i].p)) {
-            return rs[i].h(ring, client_fd);
-        }
-    }
-    
-    // Si ninguna coincide, lanzamos 404
-    error404(ring, client_fd);
+static inline void init_routes() {
+    get("/api", api);
+    get("/api/sakila/films/top", get_sakila_top_films);
+    get("/api/sakila/actors/top", get_sakila_top_actors);
 }
 
 #endif
