@@ -1,9 +1,31 @@
+/*
+ * utils/http/mime.h - deduccion de Content-Type por extension de archivo
+ *
+ * NOMBRE
+ *     mime.h - mime_type_for_path(), usada por el servidor de estaticos
+ *
+ * DESCRIPCION
+ *     Tabla fija de extensiones comunes para servir el build de Svelte y
+ *     otros assets estaticos (utils/http/static.h). Cualquier extension
+ *     no listada cae en application/octet-stream.
+ */
 #ifndef UTILS_HTTP_MIME_H
 #define UTILS_HTTP_MIME_H
 
 #include <string.h>
 #include <strings.h>
 
+/*
+ * mime_type_for_path - deduce el Content-Type a partir de la extension
+ *
+ * Parametros:
+ *   path - ruta o nombre de archivo (solo se mira desde el ultimo '.')
+ *
+ * Retorna:
+ *   el Content-Type correspondiente a la extension, o
+ *   "application/octet-stream" si no hay extension reconocida o el
+ *   archivo no tiene extension.
+ */
 static inline const char *mime_type_for_path(const char *path) {
     const char *dot = strrchr(path, '.');
     if (!dot) return "application/octet-stream";
