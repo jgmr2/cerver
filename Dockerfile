@@ -33,6 +33,7 @@ RUN echo "appuser:x:1000:1000:appuser:/home/appuser:/sbin/nologin" > /etc/passwd
 FROM scratch AS runtime
 COPY --from=build /etc/passwd_app /etc/passwd
 COPY --from=build /app/app /bin/app
+COPY --from=build /app/public /public
 
 
 EXPOSE 80

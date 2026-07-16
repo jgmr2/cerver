@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <strings.h>
 #include <arpa/inet.h>
 #include <liburing.h>
 
 #include "server.h"
 #include "../utils/events.h"
+#include "../utils/http/picohttpparser.h"
 #include "../config/db.h"
 #include "../routes/index.h"
 
@@ -75,21 +77,58 @@ void *worker_loop(void *arg) {
                 io_uring_sqe_set_data(s, actx);
 
                 if (cfd >= 0) {
-                    initial_read_ctx_t *rd = calloc(1, sizeof(initial_read_ctx_t));
-                    rd->type = EVENT_HTTP_READ_INITIAL; 
-                    rd->client_fd = cfd;
-                    
-                    s = io_uring_get_sqe(&r);
-                    io_uring_prep_read(s, cfd, rd->buf, sizeof(rd->buf) - 1, 0);
-                    io_uring_sqe_set_data(s, rd);
+                    // Mismo patron que _rearm_read: el primer read tras el accept
+                    // tambien necesita timeout. Sin esto, un cliente que abre la
+                    // conexion y nunca manda nada (slowloris) deja el fd colgado
+                    // para siempre — no hay otro punto en el codigo que lo cierre.
+                    _rearm_read(&r, cfd);
                 }
-            } 
+            }
             else if (type == EVENT_HTTP_READ_INITIAL) {
                 initial_read_ctx_t *rd = (initial_read_ctx_t*)data;
                 if (cqe->res > 0) {
-                    char m[16] = {0}, p[256] = {0};
-                    if (sscanf(rd->buf, "%15s %255s", m, p) == 2) {
-                        dispatch(&r, rd->client_fd, m, p, rd->buf);
+                    const char *method_ptr, *path_ptr;
+                    size_t method_len, path_len;
+                    int minor_version;
+                    struct phr_header hdrs[32];
+                    size_t num_hdrs = 32;
+
+                    int pret = phr_parse_request(rd->buf, (size_t)cqe->res,
+                        &method_ptr, &method_len, &path_ptr, &path_len,
+                        &minor_version, hdrs, &num_hdrs, 0);
+
+                    if (pret > 0) {
+                        char m[16] = {0}, p[256] = {0};
+                        size_t mlen = method_len < sizeof(m) - 1 ? method_len : sizeof(m) - 1;
+                        size_t plen = path_len < sizeof(p) - 1 ? path_len : sizeof(p) - 1;
+                        memcpy(m, method_ptr, mlen);
+                        memcpy(p, path_ptr, plen);
+
+                        // HTTP/1.1 asume keep-alive salvo que diga lo contrario;
+                        // HTTP/1.0 asume close salvo que lo pida explicitamente.
+                        int ka = (minor_version >= 1);
+                        int has_cl = 0, has_te = 0;
+                        for (size_t i = 0; i < num_hdrs; i++) {
+                            if (hdrs[i].name_len == 10 && strncasecmp(hdrs[i].name, "Connection", 10) == 0) {
+                                if (hdrs[i].value_len == 5 && strncasecmp(hdrs[i].value, "close", 5) == 0) ka = 0;
+                                else if (hdrs[i].value_len == 10 && strncasecmp(hdrs[i].value, "keep-alive", 10) == 0) ka = 1;
+                            }
+                            if (hdrs[i].name_len == 14 && strncasecmp(hdrs[i].name, "Content-Length", 14) == 0) has_cl = 1;
+                            if (hdrs[i].name_len == 17 && strncasecmp(hdrs[i].name, "Transfer-Encoding", 17) == 0) has_te = 1;
+                        }
+
+                        // Content-Length y Transfer-Encoding a la vez es el vector
+                        // clasico de HTTP request smuggling (desync entre nginx y
+                        // este backend sobre donde termina un request y empieza el
+                        // siguiente). No intentamos adivinar cual header "gana":
+                        // se rechaza directo y se cierra la conexion.
+                        if (has_cl && has_te) {
+                            set_keep_alive(rd->client_fd, 0);
+                            send_res(&r, rd->client_fd, "400 Bad Request", "text/plain", "400");
+                        } else {
+                            set_keep_alive(rd->client_fd, ka);
+                            dispatch(&r, rd->client_fd, m, p, rd->buf);
+                        }
                     } else {
                         close(rd->client_fd);
                     }
@@ -97,7 +136,7 @@ void *worker_loop(void *arg) {
                     close(rd->client_fd);
                 }
                 free(rd);
-            } 
+            }
             else if (type == EVENT_DB_POLL) {
                 handle_db_cqe((db_t*)data, cqe);
             }
