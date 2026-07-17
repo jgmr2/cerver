@@ -38,7 +38,7 @@
 #define JWT_TOKEN_BUF_SIZE 512
 
 /*
- * g_jwt_expires_seconds - vida de un JWT recien emitido (controllers/auth.c)
+ * g_jwt_expires_seconds - vida de un JWT recien emitido (utils/auth/auth.c)
  *
  * Variable de entorno JWT_EXPIRES_SECONDS, default 24hs. Solo lectura
  * tras main(): un cambio en caliente no afecta tokens ya emitidos (cada

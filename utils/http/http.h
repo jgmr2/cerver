@@ -114,7 +114,7 @@ typedef struct {
  * y al decidir si rearmar el read o cerrar el fd.
  *
  * Se declara extern (no static) a proposito: este header se incluye
- * desde varios .c (core/server.c, controllers/sakila.c, ...) y cada uno
+ * desde varios .c (core/server.c, utils/auth/auth.c, ...) y cada uno
  * necesita ver el MISMO arreglo por hilo. Con "static" cada translation
  * unit tendria su propia copia privada: core/server.c marcaria
  * keep-alive=1 al parsear, pero send_res_bin() llamado desde otro .c

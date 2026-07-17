@@ -196,13 +196,14 @@ que ya se resolvieron en esta sesión.
       explícito, para no tener un tercer `.md`. Sigue commiteado en el
       historial de git (`git show e9b774d:CONCURRENCY.md`) si alguien
       necesita ese detalle para tocar el motor io_uring sin ayuda.
-- [ ] Documentar en algún lado la política real de versionado de Sakila
-      como dataset de ejemplo vs. cómo un cliente nuevo reemplaza ese modelo
-      por el suyo — hoy Sakila está un poco entreverada con el boilerplate en
-      sí (`db/sakila/`, `db/init/`). Con el README recortado, esto ya no
-      tiene un lugar obvio donde vivir — decidir si va en un comentario en
-      `db/init/README.md` o se deja para cuando exista el primer cliente
-      real que necesite reemplazarlo.
+- [x] Resuelto sacando Sakila del todo en vez de documentar cómo
+      reemplazarlo: `controllers/sakila.*`, `models/sakila.*`, `db/sakila/`
+      y los scripts de `db/init/` que lo cargaban se borraron. El
+      boilerplate queda con solo la infraestructura reutilizable (auth JWT,
+      healthz, static mounts) — el esquema de negocio de cada proyecto
+      nuevo se agrega en `db/init/` y `tools/dbfiller` genera sus
+      `controllers/`/`models/`/rutas a partir de ahí (ver
+      `tools/dbfiller/README.md`, `db/init/README.md`).
 
 ## Performance
 

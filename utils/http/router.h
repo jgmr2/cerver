@@ -108,8 +108,9 @@ typedef struct {
  * utils/http/http.h: path_matches() siempre corre inlineada dentro de
  * la unidad de traduccion de core/server.c (via dispatch()), pero
  * route_param() se llama desde CUALQUIER handler — y un handler
- * definido en su propio .c (p.ej. controllers/sakila.c,
- * controllers/auth.c) es una unidad de traduccion distinta. Con
+ * definido en su propio .c (p.ej. utils/auth/auth.c, o cualquier
+ * controllers/<tabla>.c generado por tools/dbfiller) es una unidad de
+ * traduccion distinta. Con
  * "static" cada una vería su propia copia privada: server.c escribiria
  * el parametro capturado en SU copia, y el handler leeria una copia
  * distinta, siempre vacia, exactamente el mismo bug que ya paso una vez

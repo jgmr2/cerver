@@ -13,9 +13,8 @@
 #define ROUTES_INDEX_H
 
 #include "../utils/http/router.h"
-#include "../controllers/sakila.h"
 #include "../controllers/home.h"
-#include "../controllers/auth.h"
+#include "../utils/auth/auth.h"
 /* Punto de insercion de tools/dbfiller: cada tabla generada agrega su
  * propio #include "../controllers/<tabla>.h" justo antes de esta linea
  * (ver tools/dbfiller/src/repo_patch.c). No borrar este comentario. */
@@ -31,8 +30,6 @@ static inline void init_routes() {
     get("/api", api);
     get("/healthz", healthz);
     get("/api/echo/:msg", echo); /* ejemplo de ruta con parametro, ver controllers/home.h */
-    get("/api/sakila/films/top", get_sakila_top_films);
-    get("/api/sakila/actors/top", get_sakila_top_actors);
 
     post("/api/auth/register", register_user);
     post("/api/auth/login", login_user);
@@ -74,14 +71,15 @@ static inline void init_routes() {
  * existen ni que controlador es dueno de cada uno, solo llama a esta
  * funcion (una vez al arrancar el hilo y despues periodicamente cada
  * CACHE_REFRESH_SECONDS, ver core/server.c). Cada controlador que
- * necesite cachear algo en memoria agrega aca su propia linea, como
- * sakila_refresh_actors_cache (ver controllers/sakila.h).
+ * necesite cachear algo en memoria agrega aca su propia linea (ver el
+ * comentario de arriba, "dbfiller:routes-point", para el mismo
+ * principio aplicado a rutas).
  *
  * Parametros:
  *   r - anillo io_uring del hilo actual
  */
 static inline void refresh_caches(struct io_uring *r) {
-    sakila_refresh_actors_cache(r);
+    (void)r; /* sin controladores con cache en memoria todavia */
 }
 
 #endif

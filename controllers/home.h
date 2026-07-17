@@ -5,8 +5,10 @@
  *     home.h - handler de ejemplo/health-check y handler generico de 404
  *
  * DESCRIPCION
- *     A diferencia de controllers/sakila.*, este handler esta definido
- *     completo dentro del header (static/inline), por eso no existe un
+ *     A diferencia de un controller como utils/auth/auth.c (o
+ *     cualquier controllers/<tabla>.c generado por tools/dbfiller), este
+ *     handler esta definido completo dentro del header (static/inline),
+ *     por eso no existe un
  *     home.c: es un endpoint pequeno que sirve tanto de plantilla como de
  *     verificacion de que la conexion a Postgres responde.
  */
@@ -101,7 +103,8 @@ static inline void healthz(struct io_uring *r, int f, const char *m, const char 
  * mano (comillas, backslash, y caracteres de control)
  *
  * No es de uso general: los modelos de este proyecto (ver
- * controllers/sakila.c) delegan el armado de JSON en Postgres
+ * utils/auth/users.c, o cualquier models/<tabla>.c generado por
+ * tools/dbfiller) delegan el armado de JSON en Postgres
  * (row_to_json/json_agg), que ya escapa correctamente. Esta funcion
  * existe solo para el handler de ejemplo 'echo' de abajo, que si arma
  * JSON a mano con texto que viene directo del cliente HTTP.

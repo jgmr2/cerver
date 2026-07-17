@@ -47,6 +47,33 @@ static void to_pascal_copy(char *dst, size_t dst_sz, const char *src) {
     if (dst[0]) dst[0] = (char)toupper((unsigned char)dst[0]);
 }
 
+/* ---- columnas sensibles: excluidas de toda tabla, sin importar su
+   nombre real (agnostico a que tabla sea - no hay ningun nombre de
+   tabla/archivo hardcodeado aca, solo un patron sobre el NOMBRE DE
+   COLUMNA, aplicado igual sea cual sea la tabla). Motivo: un modelo
+   generado expone TODAS las columnas de la tabla via JSON por diseno
+   (ver PUBLIC_COLUMNS mas abajo); sin este filtro, una tabla con una
+   columna tipo password_hash quedaria expuesta en texto plano por un
+   GET publico apenas alguien generara esa tabla, sin que nada lo
+   avisara antes de compilar. Heuristica, no garantia: sigue siendo
+   responsabilidad de quien revise el diff confirmar que no haya otra
+   columna sensible con un nombre que no matchee este patron. */
+static const char *SENSITIVE_COLUMN_NEEDLES[] = {
+    "password", "passwd", "hash", "secret", "token", "api_key", "apikey", "credential"
+};
+#define SENSITIVE_COLUMN_NEEDLE_COUNT (int)(sizeof(SENSITIVE_COLUMN_NEEDLES) / sizeof(SENSITIVE_COLUMN_NEEDLES[0]))
+
+static int is_sensitive_column(const char *name) {
+    char lower[MAX_NAME_LEN];
+    size_t i = 0;
+    for (; name[i] && i + 1 < sizeof(lower); i++) lower[i] = (char)tolower((unsigned char)name[i]);
+    lower[i] = '\0';
+    for (int n = 0; n < SENSITIVE_COLUMN_NEEDLE_COUNT; n++) {
+        if (strstr(lower, SENSITIVE_COLUMN_NEEDLES[n])) return 1;
+    }
+    return 0;
+}
+
 /* ---- clasificacion de columnas (ver README/plan: insertable = sin
    default; actualizable = insertable menos la PK) ---- */
 
@@ -57,11 +84,17 @@ typedef struct {
     int insertable_count;
     int updatable[MAX_COLUMNS];
     int updatable_count;
+    int skipped[MAX_COLUMNS]; /* columnas sensibles excluidas, ver is_sensitive_column */
+    int skipped_count;
 } Classification;
 
 static void classify(const PgTable *t, Classification *c) {
-    c->all_count = c->insertable_count = c->updatable_count = 0;
+    c->all_count = c->insertable_count = c->updatable_count = c->skipped_count = 0;
     for (int i = 0; i < t->column_count; i++) {
+        if (is_sensitive_column(t->columns[i].name)) {
+            c->skipped[c->skipped_count++] = i;
+            continue;
+        }
         c->all[c->all_count++] = i;
         if (!t->columns[i].has_default) {
             c->insertable[c->insertable_count++] = i;
@@ -140,10 +173,22 @@ static void gen_model_c(strbuf_t *sb, const PgTable *t, const Classification *cl
     if (has_update) sb_append(sb, "#define %s_STMT_UPDATE \"%s_update\"\n", TABLE, t->name);
     sb_append(sb, "#define %s_STMT_DELETE \"%s_delete\"\n\n", TABLE, t->name);
 
+    if (cl->skipped_count > 0) {
+        char skipped_names[2048];
+        join_names(skipped_names, sizeof(skipped_names), t, cl->skipped, cl->skipped_count, ", ");
+        sb_append(sb,
+            "/* Excluidas automaticamente por nombre (password/hash/secret/token/\n"
+            "   api_key, sin importar mayusculas, ver is_sensitive_column en\n"
+            "   tools/dbfiller/src/codegen.c) - no se leen ni se aceptan via estos\n"
+            "   endpoints: %s.\n"
+            "   Si de verdad hace falta exponerlas, agregalas a mano a %s_COLUMNS\n"
+            "   (list/get) y a los INSERT/UPDATE de este archivo (create/update). */\n",
+            skipped_names, TABLE);
+    }
     sb_append(sb,
         "/* Columnas expuestas via JSON en list/get/create/update. Si esta\n"
-        "   tabla tiene columnas sensibles (passwords, tokens, etc.) sacalas\n"
-        "   de aca antes de compilar. */\n"
+        "   tabla tiene otras columnas sensibles que el filtro automatico no\n"
+        "   detecto, sacalas de aca antes de compilar. */\n"
         "#define %s_COLUMNS \"%s\"\n\n", TABLE, public_cols);
 
     sb_append(sb, "void %s_register(void) {\n", t->name);

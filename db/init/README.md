@@ -1,52 +1,39 @@
-# DB Init con Sakila
+# DB Init
 
-Este proyecto ahora usa Sakila como dataset de pruebas. El contenedor de PostgreSQL carga automaticamente los scripts dentro de `/docker-entrypoint-initdb.d` solo cuando el volumen `pgdata` es nuevo.
+El contenedor de PostgreSQL carga automáticamente los scripts `.sql` de esta
+carpeta (`/docker-entrypoint-initdb.d`), en orden alfabético, la primera vez
+que se crea el volumen `pgdata`.
 
-Orden de ejecucion:
-1. `01_auth_schema.sql` (tabla `users`, ver utils/auth/ y controllers/auth.c)
-2. `10_load_sakila.sql`
-3. `20_indexes.sql`
+Hoy solo hay uno:
 
-**Importante:** estos scripts solo corren automaticamente cuando el volumen
-`pgdata` es nuevo (primera vez que se crea el contenedor). Si agregas un
-script nuevo a esta carpeta y ya tenias el volumen de una sesion anterior,
-Postgres NO lo va a correr solo — hay que aplicarlo a mano:
+- `01_auth_schema.sql` — tabla `users` (autenticación propia JWT, ver
+  `utils/auth/` y `utils/auth/auth.c`). Es infraestructura del boilerplate,
+  no del esquema de negocio de un proyecto en particular.
+
+## Agregar el esquema de un proyecto nuevo
+
+1. Agregá tus propias tablas en un script nuevo, por ejemplo
+   `02_mi_esquema.sql` (el prefijo numérico define el orden de carga).
+2. Levantá la base (`docker compose up -d db`, o `docker compose down -v &&
+   docker compose up -d db` si el volumen `pgdata` ya existía y no vas a
+   perder nada importante).
+3. Corré [`tools/dbfiller`](../../tools/dbfiller/README.md) apuntando a esa
+   base para generar los endpoints CRUD de cada tabla — es la forma
+   pensada de llenar `controllers/`/`models/`/`routes/index.h`, en vez de
+   escribirlos a mano.
+
+**Importante:** estos scripts solo corren automáticamente cuando el volumen
+`pgdata` es nuevo. Si agregás un script a esta carpeta y ya tenías el volumen
+de una sesión anterior, Postgres NO lo va a correr solo — hay que aplicarlo a
+mano:
 
 ```bash
 docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f - < db/init/NN_nuevo.sql
 ```
 
-o, si preferis partir de cero (se pierden los datos, incluidos usuarios
-registrados):
+o partir de cero (se pierden los datos, incluidos usuarios registrados):
 
 ```bash
 docker compose down -v
-docker compose up -d
-```
-
-`10_load_sakila.sql` incluye:
-- `/sakila/10_sakila_schema.sql`
-- `/sakila/11_sakila_data.sql`
-
-`20_indexes.sql` crea indices para mejorar consultas hot como:
-- `WHERE length IS NOT NULL ORDER BY length DESC, title ASC LIMIT 10`
-
-## Reinicializar DB y recargar Sakila
-
-```bash
-docker compose down -v
-docker compose up -d db
-```
-
-## Validar tablas de Sakila
-
-```bash
-docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT count(*) AS films FROM film;"
-docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT count(*) AS actors FROM actor;"
-```
-
-## Levantar stack completo
-
-```bash
 docker compose up -d
 ```

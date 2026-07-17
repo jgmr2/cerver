@@ -5,7 +5,9 @@
  *     homeModel.h - consulta usada por controllers/home.h (GET /api)
  *
  * DESCRIPCION
- *     A diferencia de models/sakila.*, esta consulta no es un prepared
+ *     A diferencia de un modelo con prepared statements (ver
+ *     utils/auth/users.c, o cualquier models/<tabla>.c generado por
+ *     tools/dbfiller), esta consulta no es un prepared
  *     statement: controllers/home.h la lanza con db_query_async (texto
  *     plano), asi que no pasa por el registro de config/db.h.
  */

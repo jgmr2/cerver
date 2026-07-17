@@ -8,7 +8,7 @@
  *     http.h declara conn_keep_alive como extern (ver el comentario en
  *     ese header sobre por que no puede ser static): este .c es donde
  *     vive la definicion real, para que todos los archivos .c que
- *     incluyen http.h (core/server.c, controllers/sakila.c, etc.) vean
+ *     incluyen http.h (core/server.c, utils/auth/auth.c, etc.) vean
  *     el mismo arreglo por hilo en vez de copias privadas.
  */
 #include "http.h"

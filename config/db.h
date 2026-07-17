@@ -67,7 +67,7 @@ extern int g_db_connect_timeout_seconds;
  *                       no se paso ninguno). Util para pasar contexto
  *                       calculado antes de la consulta (p.ej. la
  *                       contrasena en texto plano que hay que verificar
- *                       en el callback de login, ver controllers/auth.c)
+ *                       en el callback de login, ver utils/auth/auth.c)
  *                       que no viene en el PGresult. El callback es
  *                       responsable de liberarlo si lo reservo con
  *                       malloc/calloc — config/db.c solo lo transporta,
@@ -108,7 +108,8 @@ extern __thread db_t *pool;
  * db_register_prepared - registra un prepared statement generico
  *
  * db.h/db.c no conocen ninguna tabla ni consulta especifica: cada modelo
- * (ver models/sakila.c) declara aqui, con su propio nombre y su propio
+ * (ver utils/auth/users.c, o cualquier models/<tabla>.c generado por
+ * tools/dbfiller) declara aqui, con su propio nombre y su propio
  * SQL, los statements que necesita. init_db() prepara cada entrada
  * registrada en todas las conexiones del pool de cada hilo.
  *
@@ -191,8 +192,10 @@ void db_query_prepared_async(struct io_uring *r, int f, const char *stmt, cb s, 
  * db_query_prepared_fmt_async - lanza un prepared statement eligiendo formato
  *
  * Igual que db_query_prepared_async pero permite pedir resultados en
- * formato binario (result_format=1), que es lo que usa
- * controllers/sakila.c para decodificar filas sin pasar por texto.
+ * formato binario (result_format=1), para un modelo que prefiera
+ * decodificar filas sin pasar por texto en vez del formato 0 (texto)
+ * que usa el resto del proyecto (incluido todo lo generado por
+ * tools/dbfiller).
  *
  * Parametros:
  *   r             - anillo io_uring del hilo actual
@@ -215,8 +218,9 @@ void db_query_prepared_fmt_async(struct io_uring *r, int f, const char *stmt, in
  * entre llamadas sin volver mas compleja esa estructura. Bajo pool
  * agotado se invoca el callback con res=NULL de inmediato, igual que si
  * la consulta hubiera fallado. Aceptable en la practica: pensada para
- * login/registro (controllers/auth.c), que no son el camino caliente de
- * este servidor a diferencia de las rutas de datos (sakila/top).
+ * login/registro (utils/auth/auth.c), que no son el camino caliente de
+ * este servidor a diferencia de las rutas de lectura de alto trafico
+ * (p.ej. los "list"/"get" que genera tools/dbfiller para cada tabla).
  *
  * Los valores se mandan como texto plano (formato 0 de libpq); Postgres
  * los castea segun el tipo de columna de la posicion $N correspondiente

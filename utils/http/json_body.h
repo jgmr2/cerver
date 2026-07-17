@@ -7,7 +7,7 @@
  *     controllers CRUD generados por tools/dbfiller
  *
  * DESCRIPCION
- *     controllers/auth.c ya tiene su propio parse_credentials() a mano
+ *     utils/auth/auth.c ya tiene su propio parse_credentials() a mano
  *     para dos campos fijos (username/password), siempre strings. Los
  *     endpoints generados por dbfiller necesitan lo mismo pero para un
  *     numero variable de columnas de tipos variados (texto, numeros,

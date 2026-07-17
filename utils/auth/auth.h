@@ -1,5 +1,5 @@
 /*
- * controllers/auth.h - handlers de registro/login (JWT propio)
+ * utils/auth/auth.h - handlers de registro/login (JWT propio)
  *
  * NOMBRE
  *     auth.h - POST /api/auth/register y POST /api/auth/login
@@ -10,9 +10,14 @@
  *     {"token":"<jwt>"} listo para mandar en el header
  *     "Authorization: Bearer <token>" de requests subsiguientes a rutas
  *     protegidas (get_auth/post_auth/etc., ver utils/http/router.h).
+ *
+ *     Vive junto a jwt.c/password.c en vez de en controllers/: es
+ *     infraestructura de auth reutilizable del boilerplate, no un
+ *     handler generado por tools/dbfiller (controllers/ queda
+ *     reservado para eso).
  */
-#ifndef CONTROLLERS_AUTH_H
-#define CONTROLLERS_AUTH_H
+#ifndef UTILS_AUTH_AUTH_H
+#define UTILS_AUTH_AUTH_H
 
 #include <liburing.h>
 
@@ -22,7 +27,7 @@
  * Crea un usuario nuevo con la contrasena hasheada (nunca en texto
  * plano, ver utils/auth/password.h) y responde con un JWT ya firmado
  * (auto-login tras registrarse). 400 si falta username/password o el
- * username no pasa la validacion (ver controllers/auth.c); 409 si el
+ * username no pasa la validacion (ver utils/auth/auth.c); 409 si el
  * username ya existe.
  *
  * Parametros:

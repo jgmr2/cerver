@@ -27,7 +27,7 @@
  * worker, para que un solo SIGTERM les avise a todos. Se declara extern
  * aqui (no static) por la misma razon que conn_keep_alive en
  * utils/http/http.h: este header se incluye desde varias unidades de
- * compilacion (core/server.c, controllers/sakila.c via http.h, ...) y
+ * compilacion (core/server.c, un controller como utils/auth/auth.c via http.h, ...) y
  * todas necesitan ver la misma variable, no copias privadas por archivo.
  * La definicion real vive en main.c.
  */

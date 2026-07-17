@@ -20,7 +20,6 @@ services:
       - pgdata:/var/lib/postgresql/data
       - pg_socket:/var/run/postgresql
       - ./db/init:/docker-entrypoint-initdb.d:ro
-      - ./db/sakila:/sakila:ro
     # AJUSTES DE KERNEL PARA LA DB
     sysctls:
       - net.core.somaxconn=4096           # Mayor cola de conexiones TCP

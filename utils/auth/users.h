@@ -1,13 +1,16 @@
 /*
- * models/users.h - SQL y registro de prepared statements de usuarios
+ * utils/auth/users.h - SQL y registro de prepared statements de usuarios
  *
  * NOMBRE
  *     users.h - consultas asincronas para registro/login (ver
- *     controllers/auth.c)
+ *     utils/auth/auth.c). Vive junto al resto de la infraestructura de
+ *     auth (jwt.c, password.c) y no en models/, que queda reservado
+ *     para modelos generados por tools/dbfiller.
  *
  * DESCRIPCION
- *     A diferencia de models/sakila.c (que devuelve JSON ya armado por
- *     Postgres via row_to_json), estas consultas devuelven columnas
+ *     A diferencia de un modelo generado por tools/dbfiller (que
+ *     devuelve JSON ya armado por Postgres via row_to_json), estas
+ *     consultas devuelven columnas
  *     sueltas en formato texto: el caller necesita el valor de
  *     password_hash como string plano para verificarlo con
  *     utils/auth/password.h, no como parte de un JSON que habria que
@@ -17,11 +20,11 @@
  *     db_query_prepared_params_async en config/db.h para el porque
  *     (nunca concatenar un valor de un cliente HTTP al texto SQL).
  */
-#ifndef MODELS_USERS_H
-#define MODELS_USERS_H
+#ifndef UTILS_AUTH_USERS_H
+#define UTILS_AUTH_USERS_H
 
 #include <liburing.h>
-#include "../config/db.h"
+#include "../../config/db.h"
 
 /*
  * users_register - registra los prepared statements de este modelo
@@ -43,7 +46,7 @@ void users_register(void);
  *   username - nombre de usuario a buscar
  *   callback - invocado cuando el resultado esta listo (ver cb en config/db.h)
  *   userdata - puntero opaco transportado hasta 'callback' (ver cb en
- *              config/db.h); controllers/auth.c lo usa para llevar la
+ *              config/db.h); utils/auth/auth.c lo usa para llevar la
  *              contrasena en texto plano hasta el callback de login, que
  *              la necesita para verificarla contra password_hash
  */

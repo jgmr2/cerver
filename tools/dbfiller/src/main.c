@@ -15,8 +15,7 @@
 #include <string.h>
 
 #include "introspect.h"
-#include "codegen.h"
-#include "repo_patch.h"
+#include "generate.h"
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
@@ -32,34 +31,22 @@ static void print_usage(const char *prog) {
         prog, prog);
 }
 
-/* generate_one - introspecciona y genera una sola tabla; imprime a
-   stderr y devuelve -1 si la tabla no existe o no tiene una PK simple
-   usable (no aborta --all por una tabla saltada). */
+/* generate_one - llama a dbfiller_generate_table (generate.h, la misma
+   funcion que usa la GUI) y traduce el resultado a stdout/stderr como
+   ya hacia esta funcion antes de que la orquestacion se extrajera a un
+   modulo compartido. Devuelve -1 si la tabla no existe o no tiene una
+   PK simple usable (no aborta --all por una tabla saltada). */
 static int generate_one(PGconn *conn, const char *table_name, const char *repo_root, int force) {
-    char err[MAX_ERROR_LEN];
-    PgTable table;
+    GenerateResult res;
+    dbfiller_generate_table(conn, table_name, repo_root, force, &res);
 
-    if (pg_load_table(conn, table_name, &table, err, sizeof(err)) != 0) {
-        fprintf(stderr, "%s: %s\n", table_name, err);
-        return -1;
-    }
-    if (table.pk_index < 0) {
-        fprintf(stderr, "%s: saltada -- no tiene una PRIMARY KEY de una sola columna (no soportado)\n", table_name);
-        return -1;
-    }
-
-    int has_update = 0;
-    if (codegen_write_table(&table, repo_root, force, &has_update, err, sizeof(err)) != 0) {
-        fprintf(stderr, "%s: %s\n", table_name, err);
-        return -1;
-    }
-    if (repo_patch_apply(repo_root, table_name, has_update, err, sizeof(err)) != 0) {
-        fprintf(stderr, "%s: archivos generados pero fallo el registro en routes/index.h o models/registry.h: %s\n", table_name, err);
+    if (!res.ok) {
+        fprintf(stderr, "%s: %s\n", table_name, res.message);
         return -1;
     }
 
     printf("%s: OK (controllers/%s.c/.h, models/%s.c/.h, rutas registradas%s)\n",
-           table_name, table_name, table_name, has_update ? "" : ", sin update: no tiene columnas actualizables");
+           table_name, table_name, table_name, res.has_update ? "" : ", sin update: no tiene columnas actualizables");
     return 0;
 }
 

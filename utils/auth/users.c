@@ -1,6 +1,6 @@
 /*
- * models/users.c - implementacion de users_register y las consultas
- * asincronas de usuarios (ver models/users.h)
+ * utils/auth/users.c - implementacion de users_register y las consultas
+ * asincronas de usuarios (ver utils/auth/users.h)
  */
 #include "users.h"
 

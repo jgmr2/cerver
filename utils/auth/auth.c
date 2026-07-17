@@ -1,6 +1,12 @@
 /*
- * controllers/auth.c - implementacion de register_user/login_user
- * (ver controllers/auth.h)
+ * utils/auth/auth.c - implementacion de register_user/login_user
+ * (ver utils/auth/auth.h)
+ *
+ * DESCRIPCION
+ *     Vive junto a jwt.c/password.c (infraestructura de auth
+ *     reutilizable) y no en controllers/, que queda reservado para
+ *     handlers generados por tools/dbfiller: este archivo se escribe a
+ *     mano una sola vez por boilerplate, no por tabla.
  */
 #include "auth.h"
 
@@ -8,12 +14,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../config/db.h"
-#include "../models/users.h"
-#include "../utils/http/router.h"
-#include "../utils/http/http.h"
-#include "../utils/auth/password.h"
-#include "../utils/auth/jwt.h"
+#include "../../config/db.h"
+#include "users.h"
+#include "../http/router.h"
+#include "../http/http.h"
+#include "password.h"
+#include "jwt.h"
 
 /* g_jwt_expires_seconds (utils/auth/jwt.h, variable de entorno
  * JWT_EXPIRES_SECONDS) reemplaza lo que antes era un #define fijo aca. */
