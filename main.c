@@ -9,8 +9,8 @@
  *     propio anillo io_uring, su propio pool de conexiones a la base de
  *     datos (ver config/db.c) y su propia tabla de rutas (ver
  *     routes/index.h), todo declarado __thread. No hay estado compartido
- *     entre hilos ni locks: cada uno escucha en el mismo puerto 8080
- *     gracias a SO_REUSEPORT (ver core/server.c), y el kernel reparte las
+ *     entre hilos ni locks: cada uno escucha en el mismo puerto (g_port,
+ *     ver core/server.h) gracias a SO_REUSEPORT (ver core/server.c), y el kernel reparte las
  *     conexiones entrantes entre ellos.
  *
  *     Este archivo solo se encarga de:
@@ -19,25 +19,108 @@
  *          registro en config/db.c es un arreglo global, no __thread).
  *       2. Averiguar cuantos nucleos hay.
  *       3. Lanzar un hilo worker_loop() por nucleo.
- *       4. Esperar (join) a que todos terminen, lo cual en la practica
- *          nunca ocurre salvo error fatal, manteniendo el proceso vivo.
+ *       4. Instalar los manejadores de SIGTERM/SIGINT para apagado
+ *          graceful (ver g_shutdown en utils/events.h): antes, un
+ *          "docker stop" o un redeploy mataban el proceso en seco, a
+ *          mitad de cualquier request en curso.
+ *       5. Esperar (join) a que todos terminen. En operacion normal esto
+ *          bloquea para siempre; ante SIGTERM/SIGINT, cada worker_loop
+ *          nota la bandera, deja de aceptar conexiones nuevas, drena las
+ *          que tiene en curso con un plazo maximo, y retorna — recien
+ *          ahi los join()s se completan y el proceso termina.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 #include "core/server.h"
 #include "models/registry.h"
+#include "utils/events.h"
+
+/* Definicion real de la bandera declarada extern en utils/events.h. */
+volatile sig_atomic_t g_shutdown = 0;
+
+/* Definicion real del puerto declarado extern en core/server.h. */
+int g_port = 8080;
+
+/*
+ * read_port_from_env - resuelve el puerto de escucha desde la variable
+ * de entorno PORT
+ *
+ * Se valida el rango de puerto TCP valido (1-65535); cualquier valor
+ * ausente, no numerico o fuera de rango deja el default de 8080 en vez
+ * de arrancar en un puerto inesperado o fallar el bind mas adelante con
+ * un error dificil de rastrear hasta la variable de entorno.
+ */
+static void read_port_from_env(void) {
+    const char *env = getenv("PORT");
+    if (!env || !*env) return;
+
+    char *end = NULL;
+    long v = strtol(env, &end, 10);
+    if (end == env || *end != '\0' || v < 1 || v > 65535) {
+        fprintf(stderr, "PORT invalida ('%s'), usando %d por defecto\n", env, g_port);
+        return;
+    }
+    g_port = (int)v;
+}
+
+/*
+ * require_jwt_secret - falla rapido al arrancar si JWT_SECRET no esta
+ * definida
+ *
+ * utils/auth/jwt.c lee JWT_SECRET via getenv() en cada login/registro/
+ * verificacion (no se cachea, ver el comentario en utils/auth/jwt.h);
+ * sin este chequeo, faltar la variable no se nota hasta el primer
+ * intento de login de un cliente real, que fallaria con 500 sin ninguna
+ * pista de por que. Mismo criterio que DATABASE_URL en config/db.c:
+ * mejor un error claro al arrancar que uno confuso en produccion.
+ */
+static void require_jwt_secret(void) {
+    const char *secret = getenv("JWT_SECRET");
+    if (!secret || !*secret) {
+        fprintf(stderr, "FATAL: JWT_SECRET no encontrada\n");
+        exit(1);
+    }
+}
+
+/*
+ * on_shutdown_signal - manejador de SIGTERM/SIGINT
+ *
+ * Solo escribe la bandera: cualquier otra operacion (cerrar sockets,
+ * liberar memoria, hacer I/O) no es async-signal-safe y podria
+ * interrumpir al proceso en un estado inconsistente si el handler
+ * corre en medio de esa misma operacion. Cada worker_loop es quien
+ * reacciona a la bandera desde su propio bucle principal.
+ */
+static void on_shutdown_signal(int sig) {
+    (void)sig;
+    g_shutdown = 1;
+}
 
 /*
  * main - registra los modelos, crea un hilo worker por nucleo y espera
  *
  * Retorna:
- *   0 en apagado normal (en la practica no se alcanza), 1 si falla la
- *   reserva de memoria o la creacion de algun hilo.
+ *   0 en apagado normal (graceful o en la practica nunca, segun si llega
+ *   una senal), 1 si falla la reserva de memoria o la creacion de algun
+ *   hilo.
  */
 int main() {
+    /* Sin SA_RESTART a proposito: en operacion normal ningun worker esta
+     * en un syscall que nos importe interrumpir salvo io_uring_enter (via
+     * io_uring_submit_and_wait_timeout en core/server.c), que ya tiene su
+     * propio timeout corto y no depende de EINTR para notar la bandera. */
+    struct sigaction sa = {0};
+    sa.sa_handler = on_shutdown_signal;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
+    read_port_from_env();
+    require_jwt_secret();
+
     /* Una sola vez, antes de que exista ningun hilo: puebla el registro
      * generico de prepared statements que cada init_db() (por hilo) leera. */
     register_models();
@@ -48,7 +131,7 @@ int main() {
 
     pthread_t t[n];
 
-    printf("Arrancando servidor en puerto 8080 con %d hilos (Motor V8)...\n", n);
+    printf("Arrancando servidor en puerto %d con %d hilos (Motor V8)...\n", g_port, n);
 
     for (int i = 0; i < n; i++) {
         /* El id se pasa por puntero porque pthread_create solo admite un

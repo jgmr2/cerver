@@ -1,8 +1,7 @@
-# Dependencies
-node_modules/
-venv/
-env/
-__pycache__/
+# Build outputs (ver BUILD_DIR y BIN_NAME en Makefile)
+build/
+app
+*.o
 
 # IDE
 .vscode/
@@ -14,15 +13,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Environment variables
+# Credenciales y variables de entorno
 .env
 .env.local
+*.pem
+*.key
 
-# Build outputs
-dist/
-build/
+# Logs y archivos temporales
 *.log
-
-# Temporary files
 *.tmp
-.cache/*.pem

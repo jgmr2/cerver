@@ -231,12 +231,18 @@ static inline void _close_conn(struct io_uring *ring, int fd) {
  * cliente quiere keep-alive, o la cierra si pidio close (o era HTTP/1.0
  * sin pedirlo explicitamente).
  *
+ * Durante el apagado graceful (g_shutdown, ver utils/events.h) se cierra
+ * siempre, sin importar keep-alive: es lo que hace que las conexiones
+ * existentes se vayan drenando solas a medida que cada una termina su
+ * request en curso, en vez de quedar reabriendo lecturas indefinidamente
+ * mientras el hilo intenta salir.
+ *
  * Parametros:
  *   ring - anillo io_uring del hilo actual
  *   fd   - file descriptor de la conexion recien atendida
  */
 static inline void _rearm_or_close(struct io_uring *ring, int fd) {
-    if (get_keep_alive(fd)) _rearm_read(ring, fd);
+    if (!g_shutdown && get_keep_alive(fd)) _rearm_read(ring, fd);
     else _close_conn(ring, fd);
 }
 

@@ -20,11 +20,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Paso opcional: Limpiar el mensaje del commit (quitar espacios o caracteres raros)
-      - name: Get commit message
-        id: vars
-        run: echo "commit_msg=$(echo ${GITHUB_EVENT_PULL_REQUEST_TITLE:-${{ github.event.head_commit.message }}} | tr -dc '[:alnum:]\n\r' | tr ' ' '-' | cut -c1-50)" >> $GITHUB_OUTPUT
-
       - name: Build and push
         uses: docker/build-push-action@v5
         with:

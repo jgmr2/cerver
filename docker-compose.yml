@@ -43,6 +43,7 @@ services:
       - "8080:8080"
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@/${POSTGRES_DB}?host=/var/run/postgresql
+      - JWT_SECRET=${JWT_SECRET}
     ulimits:
       memlock: -1
       nofile:                             # EL BACKEND TAMBIÉN NECESITA ESTO

@@ -50,12 +50,12 @@ void sakila_register(void) {
  * Postgres, no hay nada que decodificar en C.
  */
 void Sakila_get_top_films_async(struct io_uring *r, int client_fd, cb callback) {
-    db_query_prepared_async(r, client_fd, SAKILA_STMT_TOP_FILMS, callback);
+    db_query_prepared_async(r, client_fd, SAKILA_STMT_TOP_FILMS, callback, NULL);
 }
 
 /*
  * Sakila_get_top_actors_async - ver sakila.h
  */
 void Sakila_get_top_actors_async(struct io_uring *r, int client_fd, cb callback) {
-    db_query_prepared_async(r, client_fd, SAKILA_STMT_TOP_ACTORS, callback);
+    db_query_prepared_async(r, client_fd, SAKILA_STMT_TOP_ACTORS, callback, NULL);
 }

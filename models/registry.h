@@ -17,9 +17,11 @@
 #define MODELS_REGISTRY_H
 
 #include "../models/sakila.h"
+#include "../models/users.h"
 
 static inline void register_models(void) {
     sakila_register();
+    users_register();
 }
 
 #endif

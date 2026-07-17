@@ -15,6 +15,7 @@
 #include "../utils/http/router.h"
 #include "../controllers/sakila.h"
 #include "../controllers/home.h"
+#include "../controllers/auth.h"
 /*
  * init_routes - llena la tabla de rutas del hilo actual
  *
@@ -24,15 +25,43 @@
  */
 static inline void init_routes() {
     get("/api", api);
+    get("/healthz", healthz);
+    get("/api/echo/:msg", echo); /* ejemplo de ruta con parametro, ver controllers/home.h */
     get("/api/sakila/films/top", get_sakila_top_films);
     get("/api/sakila/actors/top", get_sakila_top_actors);
 
+    post("/api/auth/register", register_user);
+    post("/api/auth/login", login_user);
+    /* Ejemplo de ruta protegida: exige "Authorization: Bearer <token>"
+     * valido (ver dispatch en utils/http/router.h) antes de invocar el
+     * handler. Plantilla para cualquier endpoint que necesite saber
+     * quien es el usuario autenticado. */
+    get_auth("/api/me", me);
 
-    /* Raiz servida por el build de Svelte, con fallback a index.html para
-     * que su router client-side resuelva rutas como /about, /users/42,
-     * etc. /api queda reservado (ver path_is_api en router.h) y nunca
-     * cae en este fallback. */
+    /* Raiz servida como contenido estatico plano (./public), con fallback
+     * a index.html para que un router client-side (si el frontend que se
+     * monte aca tiene uno) resuelva rutas como /about, /users/42, etc.
+     * /api queda reservado (ver path_is_api en router.h) y nunca cae en
+     * este fallback. */
     mount_static("/", "./public", 1);
+}
+
+/*
+ * refresh_caches - dispara el refresco de todos los caches en memoria
+ * que hayan registrado los controladores
+ *
+ * Mismo principio que init_routes(): core/server.c no conoce que caches
+ * existen ni que controlador es dueno de cada uno, solo llama a esta
+ * funcion (una vez al arrancar el hilo y despues periodicamente cada
+ * CACHE_REFRESH_SECONDS, ver core/server.c). Cada controlador que
+ * necesite cachear algo en memoria agrega aca su propia linea, como
+ * sakila_refresh_actors_cache (ver controllers/sakila.h).
+ *
+ * Parametros:
+ *   r - anillo io_uring del hilo actual
+ */
+static inline void refresh_caches(struct io_uring *r) {
+    sakila_refresh_actors_cache(r);
 }
 
 #endif

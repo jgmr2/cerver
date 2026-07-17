@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <strings.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <liburing.h>
 
@@ -41,6 +42,14 @@
 #include "../utils/http/picohttpparser.h"
 #include "../config/db.h"
 #include "../routes/index.h"
+
+/* Plazo maximo, desde que se nota g_shutdown, para dejar terminar
+ * conexiones en curso antes de forzar la salida del hilo. */
+#define SHUTDOWN_GRACE_SECONDS 5
+
+/* Cada cuanto se refrescan los caches en memoria registrados via
+ * refresh_caches() (ver routes/index.h). */
+#define CACHE_REFRESH_SECONDS 30
 
 /*
  * accept_ctx_t - contexto persistente del accept() re-armado
@@ -56,6 +65,27 @@ typedef struct {
     struct sockaddr_in client_addr;
     socklen_t client_len;
 } accept_ctx_t;
+
+/*
+ * arm_cache_timer - arma (o re-arma) el timer periodico de refresco de caches
+ *
+ * Timeout de io_uring independiente, sin relacionar a ninguna otra
+ * operacion (a diferencia del link_timeout de _rearm_read en
+ * utils/http/http.h, que corre en paralelo con un read especifico y lo
+ * cancela): este simplemente vence cada CACHE_REFRESH_SECONDS y genera
+ * un CQE de tipo EVENT_CACHE_TICK.
+ *
+ * Parametros:
+ *   r   - anillo io_uring del hilo actual
+ *   ctx - contexto reutilizado en cada re-armado (mismo patron que
+ *         accept_ctx_t)
+ */
+static void arm_cache_timer(struct io_uring *r, cache_tick_ctx_t *ctx) {
+    static struct __kernel_timespec ts = {.tv_sec = CACHE_REFRESH_SECONDS, .tv_nsec = 0};
+    struct io_uring_sqe *sqe = io_uring_get_sqe(r);
+    io_uring_prep_timeout(sqe, &ts, 0, 0);
+    io_uring_sqe_set_data(sqe, ctx);
+}
 
 /*
  * worker_loop - punto de entrada de cada hilo worker (ver core/server.h)
@@ -78,7 +108,7 @@ void *worker_loop(void *arg) {
     struct io_uring r;
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
-    a.sin_port = htons(8080);
+    a.sin_port = htons((uint16_t)g_port);
     a.sin_addr.s_addr = INADDR_ANY;
 
     int opt = 1;
@@ -100,7 +130,7 @@ void *worker_loop(void *arg) {
     init_db(&r);       /* pool de conexiones Postgres de este hilo (config/db.c) */
     init_routes();     /* tabla de rutas de este hilo (routes/index.h)          */
 
-    printf("Hilo #%d iniciado en puerto 8080...\n", tid);
+    printf("Hilo #%d iniciado en puerto %d...\n", tid, g_port);
 
     /* Prepara el contexto de aceptacion, reutilizado en cada ciclo. */
     accept_ctx_t *actx = calloc(1, sizeof(accept_ctx_t));
@@ -112,11 +142,38 @@ void *worker_loop(void *arg) {
     io_uring_prep_accept(sqe, sfd, (struct sockaddr*)&actx->client_addr, &actx->client_len, 0);
     io_uring_sqe_set_data(sqe, actx);
 
+    /* Refresco inmediato (async, no bloquea el arranque del hilo) para
+     * que los caches en memoria esten listos lo antes posible, sin
+     * esperar el primer vencimiento del timer; despues de este, el
+     * timer es el unico que los vuelve a disparar. */
+    refresh_caches(&r);
+    cache_tick_ctx_t *cache_ctx = calloc(1, sizeof(cache_tick_ctx_t));
+    cache_ctx->type = EVENT_CACHE_TICK;
+    arm_cache_timer(&r, cache_ctx);
+
+    /* 0 mientras el hilo opera normal; al primer ciclo que ve g_shutdown
+     * en 1 se fija el plazo maximo para drenar conexiones en curso antes
+     * de forzar la salida, aunque queden operaciones sin terminar. */
+    time_t shutdown_deadline = 0;
+
     while (1) {
+        if (g_shutdown && shutdown_deadline == 0) {
+            shutdown_deadline = time(NULL) + SHUTDOWN_GRACE_SECONDS;
+        }
+        if (shutdown_deadline != 0 && time(NULL) >= shutdown_deadline) break;
+
         struct io_uring_cqe *cqe;
-        /* Bloquea hasta que haya al menos un CQE listo; procesar el resto
-         * del batch abajo evita una syscall extra por cada evento suelto. */
-        io_uring_submit_and_wait(&r, 1);
+        /* Con el proceso corriendo normal (shutdown_deadline == 0) el
+         * timeout de 1s es puramente para volver a revisar g_shutdown
+         * incluso sin trafico; una vez en apagado, ademas nos deja
+         * cortar apenas el anillo queda ocioso en vez de agotar todo
+         * el plazo de gracia sin necesidad. */
+        struct __kernel_timespec wait_ts = {.tv_sec = 1, .tv_nsec = 0};
+        int wait_res = io_uring_submit_and_wait_timeout(&r, &cqe, 1, &wait_ts, NULL);
+        if (wait_res == -ETIME) {
+            if (shutdown_deadline != 0) break; /* anillo ocioso durante el apagado: no hay nada mas que drenar */
+            continue;
+        }
 
         unsigned head;
         io_uring_for_each_cqe(&r, head, cqe) {
@@ -130,19 +187,28 @@ void *worker_loop(void *arg) {
             if (type == EVENT_ACCEPT) {
                 int cfd = cqe->res;
 
-                /* Re-armar el accept ANTES de procesar la conexion nueva:
-                 * si no se hace de inmediato, el socket de escucha deja de
-                 * aceptar mientras se atiende a este cliente. */
-                struct io_uring_sqe *s = io_uring_get_sqe(&r);
-                io_uring_prep_accept(s, sfd, (struct sockaddr*)&actx->client_addr, &actx->client_len, 0);
-                io_uring_sqe_set_data(s, actx);
+                /* En apagado no se re-arma el accept: dejar de aceptar
+                 * conexiones nuevas es la primera senal de "graceful",
+                 * antes de tocar ninguna conexion existente. */
+                if (!g_shutdown) {
+                    struct io_uring_sqe *s = io_uring_get_sqe(&r);
+                    io_uring_prep_accept(s, sfd, (struct sockaddr*)&actx->client_addr, &actx->client_len, 0);
+                    io_uring_sqe_set_data(s, actx);
+                }
 
                 if (cfd >= 0) {
-                    /* Mismo patron que _rearm_read: el primer read tras el accept
-                     * tambien necesita timeout. Sin esto, un cliente que abre la
-                     * conexion y nunca manda nada (slowloris) deja el fd colgado
-                     * para siempre — no hay otro punto en el codigo que lo cierre. */
-                    _rearm_read(&r, cfd);
+                    if (g_shutdown) {
+                        /* Conexion que alcanzo a entrar por la ventana entre
+                         * que se pidio el apagado y que dejamos de aceptar:
+                         * se cierra sin procesar en vez de dejarla a medias. */
+                        close(cfd);
+                    } else {
+                        /* Mismo patron que _rearm_read: el primer read tras el accept
+                         * tambien necesita timeout. Sin esto, un cliente que abre la
+                         * conexion y nunca manda nada (slowloris) deja el fd colgado
+                         * para siempre — no hay otro punto en el codigo que lo cierre. */
+                        _rearm_read(&r, cfd);
+                    }
                 }
             }
             else if (type == EVENT_HTTP_READ_INITIAL) {
@@ -179,23 +245,50 @@ void *worker_loop(void *arg) {
                          * HTTP/1.0 asume close salvo que lo pida explicitamente. */
                         int ka = (minor_version >= 1);
                         int has_cl = 0, has_te = 0;
+                        long content_length = -1;
                         for (size_t i = 0; i < num_hdrs; i++) {
                             if (hdrs[i].name_len == 10 && strncasecmp(hdrs[i].name, "Connection", 10) == 0) {
                                 if (hdrs[i].value_len == 5 && strncasecmp(hdrs[i].value, "close", 5) == 0) ka = 0;
                                 else if (hdrs[i].value_len == 10 && strncasecmp(hdrs[i].value, "keep-alive", 10) == 0) ka = 1;
                             }
-                            if (hdrs[i].name_len == 14 && strncasecmp(hdrs[i].name, "Content-Length", 14) == 0) has_cl = 1;
+                            if (hdrs[i].name_len == 14 && strncasecmp(hdrs[i].name, "Content-Length", 14) == 0) {
+                                has_cl = 1;
+                                /* hdrs[i].value NO esta NUL-terminado (apunta
+                                 * dentro de rd->buf): se copia a un buffer
+                                 * chico antes de pasarlo a strtol. */
+                                char clbuf[32] = {0};
+                                size_t clen = hdrs[i].value_len < sizeof(clbuf) - 1 ? hdrs[i].value_len : sizeof(clbuf) - 1;
+                                memcpy(clbuf, hdrs[i].value, clen);
+                                char *end = NULL;
+                                long v = strtol(clbuf, &end, 10);
+                                if (end != clbuf && v >= 0) content_length = v;
+                            }
                             if (hdrs[i].name_len == 17 && strncasecmp(hdrs[i].name, "Transfer-Encoding", 17) == 0) has_te = 1;
                         }
 
-                        /* Content-Length y Transfer-Encoding a la vez es el vector
-                         * clasico de HTTP request smuggling (desync entre nginx y
-                         * este backend sobre donde termina un request y empieza el
-                         * siguiente). No intentamos adivinar cual header "gana":
-                         * se rechaza directo y se cierra la conexion. */
                         if (has_cl && has_te) {
+                            /* Content-Length y Transfer-Encoding a la vez es el
+                             * vector clasico de HTTP request smuggling (desync
+                             * entre nginx y este backend sobre donde termina un
+                             * request y empieza el siguiente). No intentamos
+                             * adivinar cual header "gana": se rechaza directo. */
                             set_keep_alive(rd->client_fd, 0);
                             send_res(&r, rd->client_fd, "400 Bad Request", "text/plain", "400");
+                        } else if (content_length >= 0 && (size_t)cqe->res < (size_t)pret + (size_t)content_length) {
+                            /* El body declarado no entro completo en el unico
+                             * read que hace este servidor por request (ver
+                             * INITIAL_READ_BUF_SIZE, utils/http/http.h): sin
+                             * este chequeo, el handler recibia un body cortado
+                             * a la mitad y respondia 200 igual, como si el
+                             * request hubiera llegado entero — corrupcion
+                             * silenciosa de datos, no un simple error de
+                             * parseo. Se rechaza explicito en vez de procesar
+                             * datos incompletos. No hay reintento: soportar
+                             * bodies mas grandes que el buffer inicial
+                             * requeriria acumular varios reads antes de
+                             * dispatch(), que este servidor no hace hoy. */
+                            set_keep_alive(rd->client_fd, 0);
+                            send_res(&r, rd->client_fd, "413 Payload Too Large", "text/plain", "413");
                         } else {
                             set_keep_alive(rd->client_fd, ka);
                             dispatch(&r, rd->client_fd, m, p, rd->buf);
@@ -221,10 +314,28 @@ void *worker_loop(void *arg) {
                  * contexto, aqui no hay nada mas que hacer. */
                 http_helper_handle_cqe(cqe);
             }
+            else if (type == EVENT_CACHE_TICK) {
+                /* En apagado no tiene sentido seguir refrescando caches que
+                 * ya no van a servir ningun request nuevo (no se re-arma el
+                 * accept); se deja que el contexto quede sin re-armar, se
+                 * pierde con el free() del hilo al salir. */
+                if (!g_shutdown) {
+                    refresh_caches(&r);
+                    arm_cache_timer(&r, (cache_tick_ctx_t*)data);
+                }
+            }
 
         next:
             io_uring_cqe_seen(&r, cqe);
         }
     }
+
+    /* Se llega aca por g_shutdown, ya sea porque el plazo de gracia se
+     * agoto o porque el anillo quedo ocioso durante el apagado. Cerrar el
+     * socket de escucha es redundante en la practica (ya no se re-arma el
+     * accept), pero deja el file descriptor liberado explicitamente en
+     * vez de confiar en que lo haga la salida del proceso. */
+    close(sfd);
+    printf("Hilo #%d: apagado graceful completo.\n", tid);
     return NULL;
 }

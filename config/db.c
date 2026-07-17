@@ -22,6 +22,17 @@
  *     Todo el avance de estado ocurre en handle_db_cqe, llamado desde
  *     core/server.c cada vez que el kernel avisa (via poll de io_uring)
  *     que el socket de una conexion esta listo para leer o escribir.
+ *
+ *     start_query_with_ctx (el unico punto donde se envia una consulta
+ *     sobre una conexion ya asignada) verifica primero, via
+ *     reconnect_if_dead, que la conexion siga viva. Si Postgres se cayo
+ *     y volvio (restart, caida de red momentanea), la conexion vieja
+ *     queda con PQstatus() != CONNECTION_OK para siempre: sin este
+ *     chequeo, esa conexion quedaba muerta de forma permanente y el pool
+ *     se iba degradando conexion por conexion, sin ningun mensaje de
+ *     error visible mas alla de un 200 con un body de error. Reconectar
+ *     es la unica operacion bloqueante de todo este archivo (ver el
+ *     comentario de reconnect_if_dead para el porque de esa excepcion).
  */
 #include "db.h"
 #include <stdio.h>
@@ -45,6 +56,7 @@
  *   sql_or_stmt   - texto SQL o nombre de prepared statement, segun 'prepared'
  *   prepared      - 1 si sql_or_stmt es un nombre de prepared statement
  *   result_format - 0 = texto, 1 = binario
+ *   userdata      - puntero opaco a transportar hasta 's' (ver cb en db.h)
  */
 typedef struct {
     int f;
@@ -52,6 +64,7 @@ typedef struct {
     const char *sql_or_stmt;
     unsigned char prepared;
     unsigned char result_format;
+    void *userdata;
 } pending_req_t;
 
 /* Pool de conexiones del hilo (declarado extern en db.h). */
@@ -124,6 +137,92 @@ static int prepare_stmt(PGconn *c, const char *name, const char *sql) {
 }
 
 /*
+ * build_conninfo_with_timeout - agrega connect_timeout a un DATABASE_URL
+ *
+ * DATABASE_URL no trae por defecto ningun limite de tiempo para
+ * conectar; sin esto, un Postgres inalcanzable (red caida, host mal
+ * escrito) puede colgar PQconnectdb bastante mas de lo razonable, tanto
+ * en el arranque (init_db) como en cada intento de reconexion (ver
+ * reconnect_if_dead). Se anexa como parametro de query URI (funciona
+ * tanto si DATABASE_URL ya trae "?algo=..." como si no trae ninguno).
+ *
+ * Parametros:
+ *   base   - DATABASE_URL original, sin modificar
+ *   out    - buffer donde se escribe el conninfo resultante
+ *   out_sz - tamano de 'out'
+ */
+static void build_conninfo_with_timeout(const char *base, char *out, size_t out_sz) {
+    const char *sep = strchr(base, '?') ? "&" : "?";
+    snprintf(out, out_sz, "%s%sconnect_timeout=3", base, sep);
+}
+
+/*
+ * reconnect_if_dead - reconecta una conexion cuyo PQstatus ya no es OK
+ *
+ * Excepcion consciente a la regla de "nada bloquea al hilo worker" (ver
+ * core/server.c): PQconnectdb es sincrono. Se opta por esto en vez de
+ * una maquina de estados de reconexion asincrona completa (PQconnectStart
+ * / PQconnectPoll) porque una conexion muerta es un evento raro (un
+ * restart o una caida momentanea de Postgres), no el camino caliente; el
+ * costo, acotado por connect_timeout, es bloquear ESTE hilo unos
+ * segundos como mucho, una sola vez por conexion caida — muchisimo mejor
+ * que el estado anterior, donde una conexion muerta quedaba muerta para
+ * siempre y el pool se iba degradando conexion por conexion hasta que
+ * alguien reiniciaba el proceso a mano.
+ *
+ * Se invoca desde start_query_with_ctx, el unico punto donde se envia
+ * una consulta sobre una conexion ya asignada: cubre tanto una conexion
+ * recien sacada de free_pool como una reutilizada directamente por
+ * recycle_or_release_db.
+ *
+ * Parametros:
+ *   ctx - conexion a verificar/reconectar; ctx->c nunca queda NULL al
+ *         salir de esta funcion (ni en exito ni en fallo), para que el
+ *         resto del codigo pueda seguir llamando PQstatus/PQsocket sobre
+ *         el sin chequeos adicionales
+ *
+ * Retorna:
+ *   1 si la conexion ya estaba viva o se reconecto con exito (incluyendo
+ *   volver a preparar todos los statements del registro generico), 0 si
+ *   la reconexion fallo (la proxima vez que se use este slot se vuelve a
+ *   intentar, sin necesidad de un timer dedicado).
+ */
+static int reconnect_if_dead(db_t *ctx) {
+    if (PQstatus(ctx->c) == CONNECTION_OK) return 1;
+
+    char *u = getenv("DATABASE_URL");
+    if (!u) return 0; /* ya deberia haber fallado en init_db; defensivo */
+
+    char conninfo[1024];
+    build_conninfo_with_timeout(u, conninfo, sizeof(conninfo));
+
+    PQfinish(ctx->c); /* la conexion vieja ya esta muerta, nada que drenar */
+    PGconn *conn = PQconnectdb(conninfo);
+    /* PQconnectdb practicamente nunca devuelve NULL (solo ante fallo de
+     * malloc); se guarda igual la conexion "mala" en vez de dejar ctx->c
+     * colgando, para que la proxima llamada a esta funcion la detecte de
+     * nuevo via PQstatus en vez de haber perdido el puntero. */
+    ctx->c = conn;
+
+    if (PQstatus(conn) != CONNECTION_OK) {
+        fprintf(stderr, "DB: reconexion fallida: %s", PQerrorMessage(conn));
+        return 0;
+    }
+
+    for (int j = 0; j < prepared_registry_count; j++) {
+        if (!prepare_stmt(conn, prepared_registry[j].name, prepared_registry[j].sql)) {
+            fprintf(stderr, "DB: reconexion establecida pero fallo preparando '%s': %s",
+                    prepared_registry[j].name, PQerrorMessage(conn));
+            return 0;
+        }
+    }
+
+    PQsetnonblocking(conn, 1);
+    fprintf(stderr, "DB: conexion reestablecida\n");
+    return 1;
+}
+
+/*
  * G - obtiene un SQE (Submission Queue Entry) libre, sometiendo si hace falta
  *
  * io_uring_get_sqe devuelve NULL si la cola de envio esta llena; en ese
@@ -163,11 +262,12 @@ static inline void release_db(db_t *ctx) {
  *   s             - callback a invocar cuando la consulta termine
  *   prepared      - distinto de 0 si sql_or_stmt es un prepared statement
  *   result_format - distinto de 0 para pedir resultados en binario
+ *   userdata      - puntero opaco a transportar hasta 's' (ver cb en db.h)
  *
  * Retorna:
  *   1 si se encolo, 0 si la cola esta llena (DB_PENDING_Q alcanzado)
  */
-static inline int enqueue_pending(int f, const char *sql_or_stmt, cb s, int prepared, int result_format) {
+static inline int enqueue_pending(int f, const char *sql_or_stmt, cb s, int prepared, int result_format, void *userdata) {
     if (pending_count >= DB_PENDING_Q) return 0;
 
     pending_q[pending_tail].f = f;
@@ -175,6 +275,7 @@ static inline int enqueue_pending(int f, const char *sql_or_stmt, cb s, int prep
     pending_q[pending_tail].sql_or_stmt = sql_or_stmt;
     pending_q[pending_tail].prepared = (unsigned char)(prepared ? 1 : 0);
     pending_q[pending_tail].result_format = (unsigned char)((result_format != 0) ? 1 : 0);
+    pending_q[pending_tail].userdata = userdata;
 
     pending_tail = (pending_tail + 1) % DB_PENDING_Q;
     pending_count++;
@@ -236,10 +337,14 @@ static inline void submit_db_wait(db_t *ctx, struct io_uring *r) {
  *   result_format - 0 = texto, 1 = binario (solo aplica a prepared)
  *
  * Retorna:
- *   1 si libpq acepto encolar el envio (y ya se armo el poll con
- *   submit_db_wait), 0 si PQsendQuery/PQsendQueryPrepared fallo
+ *   1 si la conexion estaba (o quedo) viva y libpq acepto encolar el
+ *   envio (y ya se armo el poll con submit_db_wait); 0 si la reconexion
+ *   fallo (ver reconnect_if_dead) o si PQsendQuery/PQsendQueryPrepared
+ *   fallo sobre una conexion que si estaba viva.
  */
 static inline int start_query_with_ctx(db_t *ctx, struct io_uring *r, const char *sql_or_stmt, int prepared, int result_format) {
+    if (!reconnect_if_dead(ctx)) return 0;
+
     int sent = prepared
         ? PQsendQueryPrepared(ctx->c, sql_or_stmt, 0, NULL, NULL, NULL, result_format)
         : PQsendQuery(ctx->c, sql_or_stmt);
@@ -267,11 +372,12 @@ static inline void recycle_or_release_db(db_t *ctx) {
     if (dequeue_pending(&req)) {
         ctx->f = req.f;
         ctx->s = req.s;
+        ctx->userdata = req.userdata;
         if (start_query_with_ctx(ctx, ctx->r, req.sql_or_stmt, req.prepared, req.result_format)) {
             return;
         }
 
-        if (ctx->s) (void)ctx->s(ctx->r, ctx->f, NULL);
+        if (ctx->s) (void)ctx->s(ctx->r, ctx->f, NULL, ctx->userdata);
     }
 
     release_db(ctx);
@@ -340,7 +446,7 @@ void handle_db_cqe(db_t *x, struct io_uring_cqe *e) {
          * El callback solo consume datos y no debe llamar PQclear,
          * salvo que devuelva 1 para quedarse con el resultado. */
         int keep_result = 0;
-        if (x->s) keep_result = x->s(x->r, x->f, last);
+        if (x->s) keep_result = x->s(x->r, x->f, last, x->userdata);
 
         if (last && !keep_result) PQclear(last);
         recycle_or_release_db(x);
@@ -350,7 +456,7 @@ void handle_db_cqe(db_t *x, struct io_uring_cqe *e) {
 error:
     /* Conexion en error: si tenia un callback pendiente, se le avisa con
      * res=NULL antes de reciclar o liberar la conexion. */
-    if (x->b != DB_FREE && x->s) (void)x->s(x->r, x->f, NULL);
+    if (x->b != DB_FREE && x->s) (void)x->s(x->r, x->f, NULL, x->userdata);
     recycle_or_release_db(x);
 }
 
@@ -376,12 +482,15 @@ void init_db(struct io_uring *r) {
         exit(1);
     }
 
+    char conninfo[1024];
+    build_conninfo_with_timeout(u, conninfo, sizeof(conninfo));
+
     /* Reinicia el contador de libres: init_db solo se llama una vez por
      * hilo, pero se deja explicito por seguridad ante cambios futuros. */
     free_count = 0;
 
     for (int i = 0; i < S; i++) {
-        PGconn *conn = PQconnectdb(u);
+        PGconn *conn = PQconnectdb(conninfo);
         if (PQstatus(conn) != CONNECTION_OK) {
             fprintf(stderr, "FATAL: Error conectando a DB: %s\n", PQerrorMessage(conn));
             exit(1);
@@ -405,6 +514,7 @@ void init_db(struct io_uring *r) {
         pool[i].f = 0;
         pool[i].s = NULL;
         pool[i].b = DB_FREE;
+        pool[i].userdata = NULL;
 
         free_pool[free_count++] = &pool[i];
     }
@@ -419,19 +529,20 @@ void init_db(struct io_uring *r) {
  *
  * Parametros: ver db.h
  */
-void db_query_async(struct io_uring *r, int f, const char *q, cb s) {
+void db_query_async(struct io_uring *r, int f, const char *q, cb s, void *userdata) {
     if (free_count <= 0) {
-        if (!enqueue_pending(f, q, s, 0, 0) && s) (void)s(r, f, NULL);
+        if (!enqueue_pending(f, q, s, 0, 0, userdata) && s) (void)s(r, f, NULL, userdata);
         return;
     }
 
     db_t *ctx = free_pool[--free_count];
     ctx->f = f;
     ctx->s = s;
+    ctx->userdata = userdata;
 
     if (!start_query_with_ctx(ctx, r, q, 0, 0)) {
         release_db(ctx);
-        if (s) (void)s(r, f, NULL);
+        if (s) (void)s(r, f, NULL, userdata);
     }
 }
 
@@ -439,8 +550,8 @@ void db_query_async(struct io_uring *r, int f, const char *q, cb s) {
  * db_query_prepared_async - lanza un prepared statement en formato texto
  * (ver db.h). Delega en db_query_prepared_fmt_async con result_format=0.
  */
-void db_query_prepared_async(struct io_uring *r, int f, const char *stmt, cb s) {
-    db_query_prepared_fmt_async(r, f, stmt, 0, s);
+void db_query_prepared_async(struct io_uring *r, int f, const char *stmt, cb s, void *userdata) {
+    db_query_prepared_fmt_async(r, f, stmt, 0, s, userdata);
 }
 
 /*
@@ -449,18 +560,64 @@ void db_query_prepared_async(struct io_uring *r, int f, const char *stmt, cb s) 
  *
  * Parametros: ver db.h
  */
-void db_query_prepared_fmt_async(struct io_uring *r, int f, const char *stmt, int result_format, cb s) {
+void db_query_prepared_fmt_async(struct io_uring *r, int f, const char *stmt, int result_format, cb s, void *userdata) {
     if (free_count <= 0) {
-        if (!enqueue_pending(f, stmt, s, 1, result_format) && s) (void)s(r, f, NULL);
+        if (!enqueue_pending(f, stmt, s, 1, result_format, userdata) && s) (void)s(r, f, NULL, userdata);
         return;
     }
 
     db_t *ctx = free_pool[--free_count];
     ctx->f = f;
     ctx->s = s;
+    ctx->userdata = userdata;
 
     if (!start_query_with_ctx(ctx, r, stmt, 1, result_format)) {
         release_db(ctx);
-        if (s) (void)s(r, f, NULL);
+        if (s) (void)s(r, f, NULL, userdata);
+    }
+}
+
+/*
+ * start_query_with_ctx_params - envia un prepared statement con
+ * parametros sobre una conexion ya asignada
+ *
+ * Mismo chequeo de reconnect_if_dead que start_query_with_ctx; a
+ * diferencia de esa, llama PQsendQueryPrepared con los parametros
+ * reales en vez de con nParams=0.
+ *
+ * Parametros: ver db_query_prepared_params_async en db.h
+ *
+ * Retorna:
+ *   1 si la conexion estaba (o quedo) viva y libpq acepto encolar el
+ *   envio, 0 en caso contrario.
+ */
+static inline int start_query_with_ctx_params(db_t *ctx, struct io_uring *r, const char *stmt, int nParams, const char *const *paramValues, int result_format) {
+    if (!reconnect_if_dead(ctx)) return 0;
+
+    if (!PQsendQueryPrepared(ctx->c, stmt, nParams, paramValues, NULL, NULL, result_format)) return 0;
+
+    submit_db_wait(ctx, r);
+    return 1;
+}
+
+/*
+ * db_query_prepared_params_async - ver db.h
+ */
+void db_query_prepared_params_async(struct io_uring *r, int f, const char *stmt, int nParams, const char *const *paramValues, int result_format, cb s, void *userdata) {
+    if (free_count <= 0) {
+        /* Sin cola para esta variante (ver el comentario en db.h): se
+         * avisa al callback de inmediato en vez de encolar. */
+        if (s) (void)s(r, f, NULL, userdata);
+        return;
+    }
+
+    db_t *ctx = free_pool[--free_count];
+    ctx->f = f;
+    ctx->s = s;
+    ctx->userdata = userdata;
+
+    if (!start_query_with_ctx_params(ctx, r, stmt, nParams, paramValues, result_format)) {
+        release_db(ctx);
+        if (s) (void)s(r, f, NULL, userdata);
     }
 }

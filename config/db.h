@@ -29,29 +29,39 @@
  *   struct io_uring* - anillo del hilo, para responder o encadenar mas I/O
  *   int              - file descriptor del cliente que pidio la consulta
  *   PGresult*        - resultado de Postgres, o NULL si la consulta fallo
+ *   void*            - el mismo puntero 'userdata' que se paso a
+ *                       db_query_*_async al lanzar la consulta (NULL si
+ *                       no se paso ninguno). Util para pasar contexto
+ *                       calculado antes de la consulta (p.ej. la
+ *                       contrasena en texto plano que hay que verificar
+ *                       en el callback de login, ver controllers/auth.c)
+ *                       que no viene en el PGresult. El callback es
+ *                       responsable de liberarlo si lo reservo con
+ *                       malloc/calloc — config/db.c solo lo transporta,
+ *                       nunca es dueno de lo que apunta.
  *
  * Retorna (el callback):
  *   1 si se queda con la propiedad del PGresult (debe liberarlo el mismo
  *   con PQclear cuando termine de usarlo), 0 si config/db.c debe
  *   liberarlo inmediatamente despues de invocar el callback.
  */
-typedef int(*cb)(struct io_uring*,int,PGresult*);
+typedef int(*cb)(struct io_uring*,int,PGresult*,void*);
 
 /*
  * db_t - una conexion del pool y su estado
  *
  * Campos (empaquetados sin espacios a proposito, es una estructura de
  * uso interno frecuente):
- *   t - tipo de evento (siempre EVENT_DB_POLL), para que server.c
- *       reconozca este puntero al llegar como dato de un CQE
- *   c - conexion PGconn subyacente de libpq
- *   r - anillo io_uring del hilo dueno de esta conexion
- *   f - file descriptor del cliente que esta esperando el resultado
- *   s - callback (cb) a invocar cuando la consulta termine
- *   b - estado interno (DB_FREE / DB_READING / DB_FLUSHING, ver db.c)
- *   p - reservado / no usado por la logica actual
+ *   t        - tipo de evento (siempre EVENT_DB_POLL), para que server.c
+ *              reconozca este puntero al llegar como dato de un CQE
+ *   c        - conexion PGconn subyacente de libpq
+ *   r        - anillo io_uring del hilo dueno de esta conexion
+ *   f        - file descriptor del cliente que esta esperando el resultado
+ *   s        - callback (cb) a invocar cuando la consulta termine
+ *   b        - estado interno (DB_FREE / DB_READING / DB_FLUSHING, ver db.c)
+ *   userdata - puntero opaco transportado hasta el callback (ver cb arriba)
  */
-typedef struct{event_type_t t;PGconn*c;struct io_uring*r;int f;cb s;char b;int p;}db_t;
+typedef struct{event_type_t t;PGconn*c;struct io_uring*r;int f;cb s;char b;void*userdata;}db_t;
 
 /* Pool de conexiones del hilo actual; se llena en init_db(). */
 extern __thread db_t pool[S];
@@ -119,12 +129,14 @@ void handle_db_cqe(db_t*x,struct io_uring_cqe*e);
  * inmediato.
  *
  * Parametros:
- *   r - anillo io_uring del hilo actual
- *   f - file descriptor del cliente que espera el resultado
- *   q - texto SQL a ejecutar
- *   s - callback a invocar cuando la consulta termine (o falle)
+ *   r        - anillo io_uring del hilo actual
+ *   f        - file descriptor del cliente que espera el resultado
+ *   q        - texto SQL a ejecutar
+ *   s        - callback a invocar cuando la consulta termine (o falle)
+ *   userdata - puntero opaco transportado hasta 's' (ver cb); NULL si no
+ *              hace falta pasar nada
  */
-void db_query_async(struct io_uring*r,int f,const char*q,cb s);
+void db_query_async(struct io_uring*r,int f,const char*q,cb s,void*userdata);
 
 /*
  * db_query_prepared_async - lanza un prepared statement (formato texto)
@@ -132,12 +144,14 @@ void db_query_async(struct io_uring*r,int f,const char*q,cb s);
  * Equivale a db_query_prepared_fmt_async con result_format=0 (texto).
  *
  * Parametros:
- *   r    - anillo io_uring del hilo actual
- *   f    - file descriptor del cliente que espera el resultado
- *   stmt - nombre del statement ya preparado en init_db()
- *   s    - callback a invocar cuando la consulta termine (o falle)
+ *   r        - anillo io_uring del hilo actual
+ *   f        - file descriptor del cliente que espera el resultado
+ *   stmt     - nombre del statement ya preparado en init_db()
+ *   s        - callback a invocar cuando la consulta termine (o falle)
+ *   userdata - puntero opaco transportado hasta 's' (ver cb); NULL si no
+ *              hace falta pasar nada
  */
-void db_query_prepared_async(struct io_uring *r, int f, const char *stmt, cb s);
+void db_query_prepared_async(struct io_uring *r, int f, const char *stmt, cb s, void *userdata);
 
 /*
  * db_query_prepared_fmt_async - lanza un prepared statement eligiendo formato
@@ -152,5 +166,40 @@ void db_query_prepared_async(struct io_uring *r, int f, const char *stmt, cb s);
  *   stmt          - nombre del statement ya preparado en init_db()
  *   result_format - 0 = texto, 1 = binario (ver PQsendQueryPrepared)
  *   s             - callback a invocar cuando la consulta termine (o falle)
+ *   userdata      - puntero opaco transportado hasta 's' (ver cb); NULL
+ *                   si no hace falta pasar nada
  */
-void db_query_prepared_fmt_async(struct io_uring *r, int f, const char *stmt, int result_format, cb s);
+void db_query_prepared_fmt_async(struct io_uring *r, int f, const char *stmt, int result_format, cb s, void *userdata);
+
+/*
+ * db_query_prepared_params_async - lanza un prepared statement con
+ * parametros reales (formato texto)
+ *
+ * A diferencia de db_query_prepared_async, esta variante no encola la
+ * peticion si el pool esta agotado: la cola generica (pending_q, ver
+ * db.c) no tiene forma de conservar un arreglo de parametros dinamicos
+ * entre llamadas sin volver mas compleja esa estructura. Bajo pool
+ * agotado se invoca el callback con res=NULL de inmediato, igual que si
+ * la consulta hubiera fallado. Aceptable en la practica: pensada para
+ * login/registro (controllers/auth.c), que no son el camino caliente de
+ * este servidor a diferencia de las rutas de datos (sakila/top).
+ *
+ * Los valores se mandan como texto plano (formato 0 de libpq); Postgres
+ * los castea segun el tipo de columna de la posicion $N correspondiente
+ * en el SQL del prepared statement. Nunca concatenar el valor al texto
+ * SQL: siempre tiene que viajar por paramValues, es lo que evita SQL
+ * injection en cualquier query que use datos de un cliente HTTP.
+ *
+ * Parametros:
+ *   r             - anillo io_uring del hilo actual
+ *   f             - file descriptor del cliente que espera el resultado
+ *   stmt          - nombre del statement ya preparado en init_db()
+ *   nParams       - cantidad de elementos en paramValues
+ *   paramValues   - arreglo de strings NUL-terminados, uno por cada $N
+ *                   del SQL en orden ($1, $2, ...)
+ *   result_format - 0 = texto, 1 = binario
+ *   s             - callback a invocar cuando la consulta termine (o falle)
+ *   userdata      - puntero opaco transportado hasta 's' (ver cb); NULL
+ *                   si no hace falta pasar nada
+ */
+void db_query_prepared_params_async(struct io_uring *r, int f, const char *stmt, int nParams, const char *const *paramValues, int result_format, cb s, void *userdata);

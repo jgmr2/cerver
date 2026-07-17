@@ -13,6 +13,17 @@
 #define CORE_SERVER_H
 
 /*
+ * g_port - puerto TCP en el que escuchan todos los hilos worker
+ *
+ * Se lee una sola vez en main.c (variable de entorno PORT, o 8080 si no
+ * esta definida) antes de crear ningun hilo, y de ahi en adelante es de
+ * solo lectura: no hace falta que sea volatile ni __thread, porque el
+ * happens-before de pthread_create garantiza que cada hilo worker vea el
+ * valor ya asignado. La definicion real vive en main.c.
+ */
+extern int g_port;
+
+/*
  * worker_loop - ciclo de vida completo de un hilo worker
  *
  * Crea su propio socket de escucha (SO_REUSEPORT en el puerto 8080),
