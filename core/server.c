@@ -43,13 +43,9 @@
 #include "../config/db.h"
 #include "../routes/index.h"
 
-/* Plazo maximo, desde que se nota g_shutdown, para dejar terminar
- * conexiones en curso antes de forzar la salida del hilo. */
-#define SHUTDOWN_GRACE_SECONDS 5
-
-/* Cada cuanto se refrescan los caches en memoria registrados via
- * refresh_caches() (ver routes/index.h). */
-#define CACHE_REFRESH_SECONDS 30
+/* g_shutdown_grace_seconds y g_cache_refresh_seconds: declaradas extern
+ * en core/server.h, definidas y resueltas desde el entorno en main.c
+ * (SHUTDOWN_GRACE_SECONDS / CACHE_REFRESH_SECONDS). */
 
 /*
  * accept_ctx_t - contexto persistente del accept() re-armado
@@ -72,7 +68,7 @@ typedef struct {
  * Timeout de io_uring independiente, sin relacionar a ninguna otra
  * operacion (a diferencia del link_timeout de _rearm_read en
  * utils/http/http.h, que corre en paralelo con un read especifico y lo
- * cancela): este simplemente vence cada CACHE_REFRESH_SECONDS y genera
+ * cancela): este simplemente vence cada g_cache_refresh_seconds y genera
  * un CQE de tipo EVENT_CACHE_TICK.
  *
  * Parametros:
@@ -81,7 +77,15 @@ typedef struct {
  *         accept_ctx_t)
  */
 static void arm_cache_timer(struct io_uring *r, cache_tick_ctx_t *ctx) {
-    static struct __kernel_timespec ts = {.tv_sec = CACHE_REFRESH_SECONDS, .tv_nsec = 0};
+    /* static (no __thread) a proposito, mismo criterio que el ts de
+     * _rearm_read en utils/http/http.h: todos los hilos reescriben el
+     * mismo valor (g_cache_refresh_seconds no cambia despues de main()),
+     * asi que compartir la instancia entre hilos es inofensivo. No puede
+     * ser un inicializador estatico (const en tiempo de compilacion)
+     * porque el valor ahora viene de una variable de entorno. */
+    static struct __kernel_timespec ts;
+    ts.tv_sec = g_cache_refresh_seconds;
+    ts.tv_nsec = 0;
     struct io_uring_sqe *sqe = io_uring_get_sqe(r);
     io_uring_prep_timeout(sqe, &ts, 0, 0);
     io_uring_sqe_set_data(sqe, ctx);
@@ -158,7 +162,7 @@ void *worker_loop(void *arg) {
 
     while (1) {
         if (g_shutdown && shutdown_deadline == 0) {
-            shutdown_deadline = time(NULL) + SHUTDOWN_GRACE_SECONDS;
+            shutdown_deadline = time(NULL) + g_shutdown_grace_seconds;
         }
         if (shutdown_deadline != 0 && time(NULL) >= shutdown_deadline) break;
 

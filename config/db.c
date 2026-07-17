@@ -6,10 +6,11 @@
  *     db_query*_async declaradas en db.h
  *
  * DESCRIPCION
- *     Cada hilo worker mantiene S conexiones libpq en modo no bloqueante
- *     (pool[]) y una cola circular de peticiones pendientes
- *     (pending_q[]) para cuando las S conexiones estan ocupadas. El ciclo
- *     de vida de una conexion es:
+ *     Cada hilo worker mantiene g_db_pool_size conexiones libpq en modo
+ *     no bloqueante (pool[]) y una cola circular de peticiones
+ *     pendientes (pending_q[], capacidad g_db_pending_queue_size) para
+ *     cuando todas las conexiones estan ocupadas. El ciclo de vida de
+ *     una conexion es:
  *
  *       libre -> se le asigna una consulta (start_query_with_ctx)
  *             -> DB_FLUSHING si el envio no cupo de una vez (PQflush)
@@ -44,8 +45,6 @@
 #define DB_FREE     0
 #define DB_READING  1
 #define DB_FLUSHING 2
-/* Capacidad de la cola de peticiones en espera de una conexion libre. */
-#define DB_PENDING_Q 8192
 
 /*
  * pending_req_t - una peticion en espera de conexion libre
@@ -67,13 +66,19 @@ typedef struct {
     void *userdata;
 } pending_req_t;
 
-/* Pool de conexiones del hilo (declarado extern en db.h). */
-__thread db_t pool[S];
-/* Pila de punteros a conexiones libres dentro de pool[]. */
-__thread db_t *free_pool[S];
+/* Pool de conexiones del hilo (declarado extern en db.h) y pila de
+ * punteros a las libres dentro de el. Ambos NULL hasta que init_db()
+ * los reserva con calloc(g_db_pool_size, ...): antes eran arreglos de
+ * tamano fijo S, ahora el tamano se conoce recien en tiempo de
+ * ejecucion (variable de entorno DB_POOL_SIZE). */
+__thread db_t *pool = NULL;
+__thread db_t **free_pool = NULL;
 __thread int free_count = 0;
-/* Cola circular FIFO de peticiones que esperan una conexion libre. */
-__thread pending_req_t pending_q[DB_PENDING_Q];
+/* Cola circular FIFO de peticiones que esperan una conexion libre;
+ * mismo criterio que pool[] arriba, reservada en init_db() con
+ * capacidad g_db_pending_queue_size (variable de entorno
+ * DB_PENDING_QUEUE_SIZE). */
+__thread pending_req_t *pending_q = NULL;
 __thread int pending_head = 0;
 __thread int pending_tail = 0;
 __thread int pending_count = 0;
@@ -153,7 +158,7 @@ static int prepare_stmt(PGconn *c, const char *name, const char *sql) {
  */
 static void build_conninfo_with_timeout(const char *base, char *out, size_t out_sz) {
     const char *sep = strchr(base, '?') ? "&" : "?";
-    snprintf(out, out_sz, "%s%sconnect_timeout=3", base, sep);
+    snprintf(out, out_sz, "%s%sconnect_timeout=%d", base, sep, g_db_connect_timeout_seconds);
 }
 
 /*
@@ -265,10 +270,11 @@ static inline void release_db(db_t *ctx) {
  *   userdata      - puntero opaco a transportar hasta 's' (ver cb en db.h)
  *
  * Retorna:
- *   1 si se encolo, 0 si la cola esta llena (DB_PENDING_Q alcanzado)
+ *   1 si se encolo, 0 si la cola esta llena (g_db_pending_queue_size
+ *   alcanzado)
  */
 static inline int enqueue_pending(int f, const char *sql_or_stmt, cb s, int prepared, int result_format, void *userdata) {
-    if (pending_count >= DB_PENDING_Q) return 0;
+    if (pending_count >= g_db_pending_queue_size) return 0;
 
     pending_q[pending_tail].f = f;
     pending_q[pending_tail].s = s;
@@ -277,7 +283,7 @@ static inline int enqueue_pending(int f, const char *sql_or_stmt, cb s, int prep
     pending_q[pending_tail].result_format = (unsigned char)((result_format != 0) ? 1 : 0);
     pending_q[pending_tail].userdata = userdata;
 
-    pending_tail = (pending_tail + 1) % DB_PENDING_Q;
+    pending_tail = (pending_tail + 1) % g_db_pending_queue_size;
     pending_count++;
     return 1;
 }
@@ -295,7 +301,7 @@ static inline int dequeue_pending(pending_req_t *out) {
     if (pending_count <= 0) return 0;
 
     *out = pending_q[pending_head];
-    pending_head = (pending_head + 1) % DB_PENDING_Q;
+    pending_head = (pending_head + 1) % g_db_pending_queue_size;
     pending_count--;
     return 1;
 }
@@ -463,14 +469,19 @@ error:
 /*
  * init_db - conecta y prepara el pool de conexiones del hilo actual
  *
- * Lee DATABASE_URL del entorno y abre S conexiones Postgres, cada una en
- * modo no bloqueante. En cada conexion prepara todos los statements
- * presentes en el registro generico (ver db_register_prepared), sin
- * conocer a que modelo o tabla pertenece cada uno.
+ * Lee DATABASE_URL del entorno y abre g_db_pool_size conexiones
+ * Postgres, cada una en modo no bloqueante. En cada conexion prepara
+ * todos los statements presentes en el registro generico (ver
+ * db_register_prepared), sin conocer a que modelo o tabla pertenece
+ * cada uno. Tambien reserva aca, por primera y unica vez, la memoria de
+ * pool[], free_pool[] y pending_q[] (antes arreglos de tamano fijo,
+ * ahora dimensionados en tiempo de ejecucion segun g_db_pool_size /
+ * g_db_pending_queue_size).
  *
- * Termina el proceso (exit(1)) si falta DATABASE_URL, si alguna conexion
- * falla o si algun prepare falla: sin base de datos operativa no hay
- * forma razonable de seguir arrancando el hilo.
+ * Termina el proceso (exit(1)) si falta DATABASE_URL, si no se pudo
+ * reservar esa memoria, si alguna conexion falla o si algun prepare
+ * falla: sin base de datos operativa no hay forma razonable de seguir
+ * arrancando el hilo.
  *
  * Parametros:
  *   r - anillo io_uring del hilo actual, guardado en cada db_t del pool
@@ -485,11 +496,23 @@ void init_db(struct io_uring *r) {
     char conninfo[1024];
     build_conninfo_with_timeout(u, conninfo, sizeof(conninfo));
 
+    /* calloc en vez de malloc: pool[] queda cero-inicializado, mismo
+     * estado que tenia el arreglo estatico anterior antes de que el
+     * loop de abajo llene cada slot. */
+    pool = calloc((size_t)g_db_pool_size, sizeof(db_t));
+    free_pool = calloc((size_t)g_db_pool_size, sizeof(db_t *));
+    pending_q = calloc((size_t)g_db_pending_queue_size, sizeof(pending_req_t));
+    if (!pool || !free_pool || !pending_q) {
+        fprintf(stderr, "FATAL: sin memoria para el pool de DB (DB_POOL_SIZE=%d, DB_PENDING_QUEUE_SIZE=%d)\n",
+                g_db_pool_size, g_db_pending_queue_size);
+        exit(1);
+    }
+
     /* Reinicia el contador de libres: init_db solo se llama una vez por
      * hilo, pero se deja explicito por seguridad ante cambios futuros. */
     free_count = 0;
 
-    for (int i = 0; i < S; i++) {
+    for (int i = 0; i < g_db_pool_size; i++) {
         PGconn *conn = PQconnectdb(conninfo);
         if (PQstatus(conn) != CONNECTION_OK) {
             fprintf(stderr, "FATAL: Error conectando a DB: %s\n", PQerrorMessage(conn));

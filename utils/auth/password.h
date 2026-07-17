@@ -25,9 +25,21 @@
 #include <stddef.h>
 
 /* Tamano minimo recomendado para el buffer de salida de password_hash:
- * 32 bytes de sal + 32 bytes de hash, cada uno en hex (x2) mas el
- * separador ':' y el NUL, con margen. */
+ * cantidad de iteraciones en texto + 16 bytes de sal + 32 bytes de hash,
+ * cada uno en hex (x2) mas los separadores ':' y el NUL, con margen. */
 #define PASSWORD_HASH_BUF_SIZE 160
+
+/*
+ * g_pbkdf2_iterations - costo de PBKDF2 (utils/auth/password.c)
+ *
+ * Variable de entorno PBKDF2_ITERATIONS, default 100000. Solo lectura
+ * tras main(): un cambio en caliente no invalida hashes ya guardados
+ * (password_hash() graba las iteraciones usadas dentro del propio hash
+ * almacenado, y password_verify() las lee de ahi, no de esta variable
+ * — asi se puede subir el costo con el tiempo sin romper el login de
+ * usuarios existentes).
+ */
+extern int g_pbkdf2_iterations;
 
 /*
  * password_hash - genera sal aleatoria y hashea una contrasena

@@ -44,6 +44,16 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@/${POSTGRES_DB}?host=/var/run/postgresql
       - JWT_SECRET=${JWT_SECRET}
+      # Tunables operativos, todos opcionales (default razonable si no se
+      # definen en .env, ver README.md):
+      - PORT=${PORT:-8080}
+      - SHUTDOWN_GRACE_SECONDS=${SHUTDOWN_GRACE_SECONDS:-5}
+      - CACHE_REFRESH_SECONDS=${CACHE_REFRESH_SECONDS:-30}
+      - DB_CONNECT_TIMEOUT_SECONDS=${DB_CONNECT_TIMEOUT_SECONDS:-3}
+      - JWT_EXPIRES_SECONDS=${JWT_EXPIRES_SECONDS:-86400}
+      - PBKDF2_ITERATIONS=${PBKDF2_ITERATIONS:-100000}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-16}
+      - DB_PENDING_QUEUE_SIZE=${DB_PENDING_QUEUE_SIZE:-8192}
     ulimits:
       memlock: -1
       nofile:                             # EL BACKEND TAMBIÉN NECESITA ESTO

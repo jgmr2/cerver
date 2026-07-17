@@ -38,9 +38,10 @@ que ya se resolvieron en esta sesión.
       re-preparando todos los statements del registro). Repetido el mismo
       test tras el fix: 8,642 fallos (la ventana real de la caída, inevitable
       sin una cola de reintentos a nivel HTTP) pero el pool se recupera solo
-      — cero intervención manual. Es la única excepción documentada a "nada
-      bloquea al hilo worker" (ver `CONCURRENCY.md`, punto 5) porque una
-      reconexión async completa (`PQconnectStart`/`PQconnectPoll`) es mucho
+      — cero intervención manual. Es la única excepción a "nada bloquea al
+      hilo worker" en todo el motor, documentada en el propio
+      `reconnect_if_dead()` (`config/db.c`), porque una reconexión async
+      completa (`PQconnectStart`/`PQconnectPoll`) es mucho
       más código para un evento raro; si las caídas de Postgres son
       frecuentes en producción, ahí sí conviene escribir esa versión.
 - [ ] Definir política de reintentos/circuit breaker cuando el pool de un hilo
@@ -178,20 +179,30 @@ que ya se resolvieron en esta sesión.
 
 ## Proceso / documentación
 
-- [x] `README.md` con propósito, arquitectura y guía de "cómo agregar un
-      endpoint".
-- [ ] Documentar en el README (o acá) la política real de versionado de Sakila
+- [x] `README.md` con propósito y objetivos del proyecto. Reescrito para
+      quedar deliberadamente corto (qué es, por qué existe, filosofía de
+      diseño, puesta en marcha mínima) en vez del manual técnico extenso
+      que tenía antes — ese detalle (ciclo de vida de un request, capa de
+      datos, cómo agregar un endpoint paso a paso) se sacó del repo; sigue
+      recuperable en el historial de git (`git log` sobre `README.md`) si
+      hace falta reconstruirlo.
+- [x] Repo limpiado de archivos innecesarios: se borró `build/` (artefactos
+      de compilación fuera de Docker, ya cubiertos por `.gitignore` pero
+      habían quedado en disco) y se consolidó toda la documentación en
+      exactamente dos `.md` (este archivo y `README.md`).
+- [x] `CONCURRENCY.md` (ownership de `req_t`/`PGresult`, la regla
+      `__thread`+`extern`, el patrón `io_uring_prep_link_timeout`, el
+      protocolo de `g_shutdown`) se eliminó del working tree a pedido
+      explícito, para no tener un tercer `.md`. Sigue commiteado en el
+      historial de git (`git show e9b774d:CONCURRENCY.md`) si alguien
+      necesita ese detalle para tocar el motor io_uring sin ayuda.
+- [ ] Documentar en algún lado la política real de versionado de Sakila
       como dataset de ejemplo vs. cómo un cliente nuevo reemplaza ese modelo
       por el suyo — hoy Sakila está un poco entreverada con el boilerplate en
-      sí (`db/sakila/`, `db/init/`).
-- [x] Decidir bus factor: si esto crece, va a necesitar que alguien más pueda
-      tocar el motor io_uring sin vos al lado. Escrito
-      [`CONCURRENCY.md`](CONCURRENCY.md): ownership de `req_t` y `PGresult`,
-      ciclo de vida de un `db_t`, la regla `__thread`+`extern` (con el bug
-      real de `conn_keep_alive` de esta sesión como ejemplo concreto), el
-      patrón `io_uring_prep_link_timeout` vs `io_uring_prep_timeout`, la
-      única excepción a "nada bloquea al hilo worker", y el protocolo de
-      `g_shutdown`. Enlazado desde el README.
+      sí (`db/sakila/`, `db/init/`). Con el README recortado, esto ya no
+      tiene un lugar obvio donde vivir — decidir si va en un comentario en
+      `db/init/README.md` o se deja para cuando exista el primer cliente
+      real que necesite reemplazarlo.
 
 ## Performance
 
@@ -207,9 +218,81 @@ que ya se resolvieron en esta sesión.
       registra ahí. Medido después del fix: 54,982 req/s (30x) con Postgres
       de vuelta en ~0% CPU. `films/top` no se tocó, no tenía este problema.
 
+## Reutilización / configuración
+
+- [x] **Mover constantes hardcodeadas a variables de entorno.** Se auditó
+      todo el repo (`grep` de `#define` numéricos) y se separaron dos
+      grupos: los que son tunables operativos reales (movidos hoy) y los
+      que dimensionan arreglos estáticos en el hot path (`S` — tamaño del
+      pool de Postgres por hilo, `DB_PENDING_Q`, `INITIAL_READ_BUF_SIZE`),
+      que requieren convertir esos arreglos a memoria dinámica — quedan
+      pendientes, ver el ítem de abajo.
+      Movidos: `PORT` (ya estaba), `SHUTDOWN_GRACE_SECONDS`,
+      `CACHE_REFRESH_SECONDS`, `DB_CONNECT_TIMEOUT_SECONDS`,
+      `JWT_EXPIRES_SECONDS`, `PBKDF2_ITERATIONS` — todos con default igual
+      al valor que tenían hardcodeado, resueltos una sola vez en `main()`
+      (`read_long_env()`), sin recompilar para ajustarlos por deployment.
+      Caso especial: `PBKDF2_ITERATIONS` no se podía mover ingenuamente —
+      el número de iteraciones ahora viaja *dentro* del hash guardado
+      (`"iteraciones:salt:hash"`, antes `"salt:hash"`), no se lee de la
+      variable de entorno al verificar. Sin esto, cambiar la variable
+      rompería el login de todos los usuarios ya registrados (se
+      verificarían con un costo distinto al que se usó para crear su
+      hash). Efecto secundario esperado y aceptado: los usuarios de
+      prueba creados durante esta sesión (formato viejo) ya no pueden
+      loguearse — son cuentas de prueba, sin impacto real.
+      Probado con contenedor aparte (`PORT`, `JWT_EXPIRES_SECONDS=60` +
+      espera real a que venza, `PBKDF2_ITERATIONS=5000` con tiempo de
+      registro medido contra el default, `SHUTDOWN_GRACE_SECONDS=2` con
+      `docker stop` en medio de tráfico) — todos los valores confirmados
+      en uso real, no solo que compilan.
+- [x] **`S` → `DB_POOL_SIZE` y `DB_PENDING_Q` → `DB_PENDING_QUEUE_SIZE`,
+      movidos a variables de entorno.** Estos dos sí dimensionaban
+      arreglos `__thread` estáticos (`db_t pool[S]`,
+      `pending_req_t pending_q[DB_PENDING_Q]`) en el camino caliente de
+      cada consulta a Postgres — no era un simple `getenv()`: `pool[]`,
+      `free_pool[]` y `pending_q[]` pasaron de arreglos de tamaño fijo a
+      punteros reservados una sola vez con `calloc()` en `init_db()`,
+      usando el tamaño ya resuelto desde el entorno. `db_t *pool` (antes
+      `db_t pool[S]`) es el único cambio de tipo visible desde afuera de
+      `config/db.c`, y no tiene otros usos fuera de ese archivo (se
+      verificó con grep antes de tocarlo).
+      Probado con un contenedor aparte: `DB_POOL_SIZE=2` (default 16) dio
+      exactamente 16 conexiones nuevas en `pg_stat_activity` (8 hilos ×
+      2, no 8 × 16), y aguantó `ab -c 100` contra un pool de solo 16
+      conexiones totales sin un solo fallo — la cola absorbió la
+      sobrecarga como se esperaba. De paso, un load test post-cambio dio
+      un resultado bajo (~4.6k req/s en `films/top`) que resultó ser
+      ruido transitorio del arranque del contenedor, no una regresión:
+      se repitió 3 veces más y volvió al rango esperado (17k+ req/s) de
+      forma estable — anotado acá para que si alguien ve un número raro
+      en el primer request después de levantar el contenedor, sepa que
+      ya se investigó y no es un bug de esta sesión.
+- [ ] Mismo caso para `INITIAL_READ_BUF_SIZE` (`utils/http/http.h`, hoy
+      4096): dimensiona el buffer de lectura inicial de cada conexión, y
+      está directamente atado a la validación de `Content-Length` que
+      hoy responde `413` si el body no entra ahí. Configurable en teoría,
+      pero cualquier cambio ahí hay que volver a probarlo contra ese caso
+      específico para no reintroducir el bug de truncado silencioso que
+      se arregló antes.
+
 ## Ideas para más adelante (no bloqueante)
 
 - [ ] Rate limiting básico por IP/fd.
 - [ ] Soporte HTTPS/TLS (hoy asume que hay un proxy tipo nginx delante).
 - [ ] Métrica de éxito del fallback SPA vs 404 reales, para detectar rutas de
       frontend rotas.
+- [ ] **Imagen del backend: 245KB → 2.56MB comprimida** tras agregar auth
+      (OpenSSL estático, ~5.1MB crudo, `--gc-sections` no ayuda porque
+      HMAC/PBKDF2/`RAND_bytes` arrastran el resto de la librería) y
+      `/docs` (Swagger UI vendorizado, `swagger-ui-bundle.js` solo pesa
+      1.5MB). Evaluado hoy y decidido dejarlo así por ahora — 2.56MB sigue
+      siendo chico en términos absolutos. Si el tamaño vuelve a importar
+      (más tenants por instancia, por ejemplo), las opciones que quedaron
+      sobre la mesa son: (a) Dockerfile con target `dev` (con `docs-ui/`)
+      y target `prod` (sin él, vuelve a ~500-600KB) — `docker-compose.yml`
+      usando `dev` por default; o (b) reemplazar Swagger UI por un
+      renderer de solo-lectura (sin "probar el endpoint"), bajando
+      `docs-ui/` de 2MB a <100KB. El costo de OpenSSL no tiene una opción
+      barata: reemplazarlo por una librería de crypto más chica es
+      arriesgado para algo que firma contraseñas y tokens.

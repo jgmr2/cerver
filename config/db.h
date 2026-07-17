@@ -6,8 +6,8 @@
  *     lanzar consultas a Postgres sin bloquear el hilo worker
  *
  * DESCRIPCION
- *     Cada hilo worker (core/server.c) tiene su propio pool de S
- *     conexiones libpq, todas en modo no bloqueante (PQsetnonblocking) y
+ *     Cada hilo worker (core/server.c) tiene su propio pool de
+ *     g_db_pool_size conexiones libpq, todas en modo no bloqueante y
  *     multiplexadas sobre el mismo anillo io_uring del hilo via
  *     io_uring_prep_poll_add sobre el file descriptor del socket de
  *     libpq. No hay hilos dedicados a la base de datos ni bloqueo alguno:
@@ -19,8 +19,41 @@
 #include <liburing.h>
 #include "../utils/events.h"
 
-/* Tamano del pool de conexiones por hilo. */
-#define S 16
+/*
+ * g_db_pool_size - tamano del pool de conexiones a Postgres, por hilo
+ * (reemplaza lo que antes era #define S 16)
+ *
+ * Variable de entorno DB_POOL_SIZE, default 16. Con N hilos worker, el
+ * total de conexiones abiertas contra Postgres es N * g_db_pool_size —
+ * tiene que quedar por debajo de max_connections de Postgres con margen
+ * para otros clientes (psql, herramientas de administracion, etc.).
+ *
+ * pool[] (mas abajo) pasa de ser un arreglo estatico de tamano S a un
+ * puntero reservado con calloc en init_db() usando este valor: por eso
+ * es 'extern int' (solo lectura tras main(), como el resto de los
+ * tunables) y no un #define — el tamano ya no se conoce en tiempo de
+ * compilacion.
+ */
+extern int g_db_pool_size;
+
+/*
+ * g_db_pending_queue_size - capacidad de la cola de peticiones que
+ * esperan una conexion libre (pending_q, config/db.c)
+ *
+ * Variable de entorno DB_PENDING_QUEUE_SIZE, default 8192 (reemplaza lo
+ * que antes era #define DB_PENDING_Q).
+ */
+extern int g_db_pending_queue_size;
+
+/*
+ * g_db_connect_timeout_seconds - limite de tiempo para PQconnectdb
+ * (init_db y reconnect_if_dead, config/db.c)
+ *
+ * Variable de entorno DB_CONNECT_TIMEOUT_SECONDS, default 3. Sin esto,
+ * un Postgres inalcanzable puede colgar la conexion (inicial o de
+ * reconexion) bastante mas de lo razonable.
+ */
+extern int g_db_connect_timeout_seconds;
 
 /*
  * cb - callback invocado cuando una consulta asincrona termina
@@ -63,8 +96,9 @@ typedef int(*cb)(struct io_uring*,int,PGresult*,void*);
  */
 typedef struct{event_type_t t;PGconn*c;struct io_uring*r;int f;cb s;char b;void*userdata;}db_t;
 
-/* Pool de conexiones del hilo actual; se llena en init_db(). */
-extern __thread db_t pool[S];
+/* Pool de conexiones del hilo actual: puntero (no arreglo de tamano
+ * fijo), reservado con calloc(g_db_pool_size, ...) en init_db(). */
+extern __thread db_t *pool;
 
 /* Cupo maximo de prepared statements que puede registrar el conjunto de
  * modelos via db_register_prepared(). */
@@ -91,9 +125,9 @@ extern __thread db_t pool[S];
 void db_register_prepared(const char *name, const char *sql);
 
 /*
- * init_db - crea las S conexiones a Postgres del hilo actual
+ * init_db - crea las g_db_pool_size conexiones a Postgres del hilo actual
  *
- * Lee DATABASE_URL del entorno, conecta las S conexiones, las pone en
+ * Lee DATABASE_URL del entorno, conecta las conexiones, las pone en
  * modo no bloqueante y prepara en cada una todos los statements que se
  * hayan registrado con db_register_prepared() antes de llamar a esta
  * funcion. Sale del proceso (exit(1)) si falta la variable de entorno o

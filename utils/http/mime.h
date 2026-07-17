@@ -45,6 +45,7 @@ static inline const char *mime_type_for_path(const char *path) {
     if (!strcasecmp(dot, ".woff2")) return "font/woff2";
     if (!strcasecmp(dot, ".wasm")) return "application/wasm";
     if (!strcasecmp(dot, ".map"))  return "application/json";
+    if (!strcasecmp(dot, ".yaml") || !strcasecmp(dot, ".yml")) return "text/yaml; charset=utf-8";
 
     return "application/octet-stream";
 }

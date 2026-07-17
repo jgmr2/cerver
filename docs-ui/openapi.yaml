@@ -1,0 +1,235 @@
+openapi: 3.0.3
+info:
+  title: cerver API
+  description: >
+    Documentación de los endpoints expuestos por este backend. Se mantiene
+    a mano junto con cada ruta nueva (ver routes/index.h): agregar un
+    endpoint significa agregar una línea acá también, mismo criterio que
+    el resto del boilerplate — nada se genera solo.
+  version: "1.0.0"
+servers:
+  - url: /
+    description: Mismo origen (detrás de nginx, junto al frontend)
+
+tags:
+  - name: infra
+    description: Health checks, sin lógica de negocio
+  - name: sakila
+    description: Endpoints de ejemplo sobre el dataset Sakila
+  - name: auth
+    description: Registro, login y verificación de identidad (JWT HS256)
+  - name: ejemplos
+    description: Endpoints de plantilla/demostración del boilerplate
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Token obtenido de POST /api/auth/login o /api/auth/register.
+        Mandar como "Authorization: Bearer <token>".
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+paths:
+  /healthz:
+    get:
+      tags: [infra]
+      summary: Liveness check (no toca la base de datos)
+      description: >
+        Responde 200 en cuanto el proceso esta vivo y atendiendo
+        conexiones, sin esperar ningun round-trip a Postgres. Si /healthz
+        da 200 y /api no, el problema esta en la DB, no en el proceso.
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /api:
+    get:
+      tags: [infra]
+      summary: Prueba de vida de la base de datos
+      description: Dispara "SELECT current_timestamp" contra Postgres.
+      responses:
+        "200":
+          description: Consulta exitosa
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bytes: { type: integer }
+                  hex: { type: string }
+        "200-error":
+          description: "La consulta a la DB fallo (sigue respondiendo 200; ver body)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  e: { type: integer, example: 503 }
+
+  /api/echo/{msg}:
+    get:
+      tags: [ejemplos]
+      summary: Ejemplo de ruta con parámetro de path
+      description: >
+        No toca la base de datos. Plantilla para cualquier endpoint que
+        necesite un identificador en la URL (p.ej. "/recursos/{id}").
+      parameters:
+        - name: msg
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  msg: { type: string }
+        "404":
+          description: Segmento vacío o con más segmentos de los esperados
+
+  /api/sakila/films/top:
+    get:
+      tags: [sakila]
+      summary: Top 10 películas por duración
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title: { type: string }
+                        length: { type: integer }
+                        release_year: { type: integer }
+                        rating: { type: string }
+
+  /api/sakila/actors/top:
+    get:
+      tags: [sakila]
+      summary: Top 10 actores por cantidad de películas
+      description: >
+        Servido desde un cache en memoria por hilo, refrescado cada 30s
+        (ver sakila_refresh_actors_cache) — no golpea Postgres en cada
+        request. La consulta original (JOIN + GROUP BY) era el cuello de
+        botella real del servidor bajo carga antes del cache.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        first_name: { type: string }
+                        last_name: { type: string }
+                        films: { type: integer }
+
+  /api/auth/register:
+    post:
+      tags: [auth]
+      summary: Crea un usuario nuevo y devuelve un JWT (auto-login)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  description: 3-32 caracteres, alfanumérico + "_"/"-"
+                password:
+                  type: string
+                  description: mínimo 8 caracteres
+                  format: password
+      responses:
+        "200":
+          description: Usuario creado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        "400":
+          description: Body inválido, username/password no cumplen el formato
+        "409":
+          description: El username ya existe
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Autentica un usuario existente y devuelve un JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Login exitoso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        "400":
+          description: Body inválido
+        "401":
+          description: >
+            Usuario inexistente o contraseña incorrecta — misma respuesta
+            en ambos casos, para no revelar qué usernames existen.
+
+  /api/me:
+    get:
+      tags: [auth]
+      summary: Devuelve los claims del JWT actual
+      description: Ruta protegida de ejemplo (get_auth). Plantilla para cualquier endpoint que necesite saber quién es el usuario autenticado.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Token válido
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sub: { type: string, description: "id de usuario" }
+                  username: { type: string }
+        "401":
+          description: Token faltante, inválido o vencido

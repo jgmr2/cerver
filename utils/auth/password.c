@@ -5,6 +5,7 @@
 #include "password.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <openssl/rand.h>
 #include <openssl/evp.h>
@@ -12,13 +13,10 @@
 
 #define SALT_BYTES 16
 #define HASH_BYTES 32
-/* Iteraciones de PBKDF2: valor conservador para no introducir latencia
- * notable en login bajo el modelo sin-bloqueo (esto SI bloquea el hilo
- * worker que lo ejecuta, como cualquier hash de contrasenas: es CPU
- * pura, breve, y solo corre en login/registro, no en el camino
- * caliente de las rutas de datos). Subir este numero si el hardware de
- * destino lo permite comodamente. */
-#define PBKDF2_ITERATIONS 100000
+/* g_pbkdf2_iterations (utils/auth/password.h, variable de entorno
+ * PBKDF2_ITERATIONS): esto SI bloquea el hilo worker que lo ejecuta,
+ * como cualquier hash de contrasenas — es CPU pura, breve, y solo corre
+ * en login/registro, no en el camino caliente de las rutas de datos. */
 
 static void bytes_to_hex(const unsigned char *in, size_t in_len, char *out) {
     static const char hexchars[] = "0123456789abcdef";
@@ -58,7 +56,7 @@ int password_hash(const char *password, char *out, size_t out_sz) {
 
     unsigned char hash[HASH_BYTES];
     if (PKCS5_PBKDF2_HMAC(password, (int)strlen(password), salt, sizeof(salt),
-                           PBKDF2_ITERATIONS, EVP_sha256(), sizeof(hash), hash) != 1) {
+                           g_pbkdf2_iterations, EVP_sha256(), sizeof(hash), hash) != 1) {
         return 0;
     }
 
@@ -67,26 +65,41 @@ int password_hash(const char *password, char *out, size_t out_sz) {
     bytes_to_hex(salt, sizeof(salt), salt_hex);
     bytes_to_hex(hash, sizeof(hash), hash_hex);
 
-    int n = snprintf(out, out_sz, "%s:%s", salt_hex, hash_hex);
+    /* Las iteraciones van adentro del hash guardado (no solo en la
+     * variable de entorno): asi, si el dia de mañana se sube
+     * PBKDF2_ITERATIONS para hashes nuevos, los usuarios que ya se
+     * registraron con el valor viejo siguen pudiendo loguearse — cada
+     * hash se verifica con las iteraciones con las que se creo, no con
+     * las que este configuradas ahora. */
+    int n = snprintf(out, out_sz, "%d:%s:%s", g_pbkdf2_iterations, salt_hex, hash_hex);
     return n > 0 && (size_t)n < out_sz;
 }
 
 int password_verify(const char *password, const char *stored) {
-    const char *sep = strchr(stored, ':');
+    /* Formato: "iteraciones:salt_hex:hash_hex" (ver el comentario en
+     * password_hash sobre por que las iteraciones viajan en el string
+     * guardado y no se toman de g_pbkdf2_iterations aca). */
+    char *end = NULL;
+    long iterations = strtol(stored, &end, 10);
+    if (end == stored || *end != ':' || iterations < 1) return 0;
+
+    const char *salt_hex = end + 1;
+    const char *sep = strchr(salt_hex, ':');
     if (!sep) return 0;
 
-    size_t salt_hex_len = (size_t)(sep - stored);
-    size_t hash_hex_len = strlen(sep + 1);
+    size_t salt_hex_len = (size_t)(sep - salt_hex);
+    const char *hash_hex = sep + 1;
+    size_t hash_hex_len = strlen(hash_hex);
     if (salt_hex_len != SALT_BYTES * 2 || hash_hex_len != HASH_BYTES * 2) return 0;
 
     unsigned char salt[SALT_BYTES];
     unsigned char expected_hash[HASH_BYTES];
-    if (!hex_to_bytes(stored, salt, sizeof(salt))) return 0;
-    if (!hex_to_bytes(sep + 1, expected_hash, sizeof(expected_hash))) return 0;
+    if (!hex_to_bytes(salt_hex, salt, sizeof(salt))) return 0;
+    if (!hex_to_bytes(hash_hex, expected_hash, sizeof(expected_hash))) return 0;
 
     unsigned char computed_hash[HASH_BYTES];
     if (PKCS5_PBKDF2_HMAC(password, (int)strlen(password), salt, sizeof(salt),
-                           PBKDF2_ITERATIONS, EVP_sha256(), sizeof(computed_hash), computed_hash) != 1) {
+                           (int)iterations, EVP_sha256(), sizeof(computed_hash), computed_hash) != 1) {
         return 0;
     }
 

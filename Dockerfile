@@ -41,6 +41,7 @@ FROM scratch AS runtime
 COPY --from=build /etc/passwd_app /etc/passwd
 COPY --from=build /app/app /bin/app
 COPY --from=build /app/public /public
+COPY --from=build /app/docs-ui /docs-ui
 
 # El binario lee PORT al arrancar (ver g_port en core/server.h); si no
 # esta definida usa 8080. EXPOSE es solo metadata para quien lea la

@@ -15,9 +15,8 @@
 #include "../utils/auth/password.h"
 #include "../utils/auth/jwt.h"
 
-/* Vida del token emitido por login/registro. Boilerplate: subir/bajar
- * segun la politica real que necesite cada proyecto. */
-#define JWT_EXPIRES_SECONDS (60L * 60L * 24L) /* 24 horas */
+/* g_jwt_expires_seconds (utils/auth/jwt.h, variable de entorno
+ * JWT_EXPIRES_SECONDS) reemplaza lo que antes era un #define fijo aca. */
 
 /*
  * username_is_valid - unico chequeo de formato sobre el username
@@ -98,7 +97,7 @@ static int parse_credentials(const char *buf, char *username_out, size_t usernam
 static void issue_token_response(struct io_uring *r, int fd, const char *id_str, const char *username) {
     const char *secret = getenv("JWT_SECRET");
     char token[JWT_TOKEN_BUF_SIZE];
-    if (!secret || !jwt_create(secret, id_str, username, JWT_EXPIRES_SECONDS, token, sizeof(token))) {
+    if (!secret || !jwt_create(secret, id_str, username, g_jwt_expires_seconds, token, sizeof(token))) {
         send_res(r, fd, "500 Internal Server Error", "text/plain", "500");
         return;
     }

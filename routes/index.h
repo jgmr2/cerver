@@ -38,6 +38,17 @@ static inline void init_routes() {
      * quien es el usuario autenticado. */
     get_auth("/api/me", me);
 
+    /* Documentacion interactiva de la API (Swagger UI, vendorizado en
+     * docs-ui/), servida como contenido estatico plano — no lleva
+     * fallback SPA (spa_fallback=0): un asset de la doc que falte tiene
+     * que dar 404 real, no caer en el index.html del frontend.
+     *
+     * Se registra ANTES del mount "/": try_serve_static() (utils/http/static.h)
+     * recorre static_mounts[] en orden y el mount "/" matchea CUALQUIER
+     * path (prefijo de un solo caracter), asi que si se registrara
+     * primero, "/docs/..." nunca llegaria a este mount. */
+    mount_static("/docs", "./docs-ui", 0);
+
     /* Raiz servida como contenido estatico plano (./public), con fallback
      * a index.html para que un router client-side (si el frontend que se
      * monte aca tiene uno) resuelva rutas como /about, /users/42, etc.

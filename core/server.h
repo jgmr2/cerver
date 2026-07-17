@@ -24,6 +24,24 @@
 extern int g_port;
 
 /*
+ * g_shutdown_grace_seconds - plazo maximo, desde que un hilo nota
+ * g_shutdown, para dejar terminar conexiones en curso antes de forzar
+ * la salida (ver worker_loop en core/server.c)
+ *
+ * Variable de entorno SHUTDOWN_GRACE_SECONDS, default 5. Solo lectura
+ * tras main(): mismo criterio que g_port arriba.
+ */
+extern long g_shutdown_grace_seconds;
+
+/*
+ * g_cache_refresh_seconds - cada cuanto se refrescan los caches en
+ * memoria registrados via refresh_caches() (ver routes/index.h)
+ *
+ * Variable de entorno CACHE_REFRESH_SECONDS, default 30.
+ */
+extern long g_cache_refresh_seconds;
+
+/*
  * worker_loop - ciclo de vida completo de un hilo worker
  *
  * Crea su propio socket de escucha (SO_REUSEPORT en el puerto 8080),

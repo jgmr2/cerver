@@ -38,12 +38,60 @@
 #include "core/server.h"
 #include "models/registry.h"
 #include "utils/events.h"
+#include "config/db.h"
+#include "utils/auth/jwt.h"
+#include "utils/auth/password.h"
 
 /* Definicion real de la bandera declarada extern en utils/events.h. */
 volatile sig_atomic_t g_shutdown = 0;
 
 /* Definicion real del puerto declarado extern en core/server.h. */
 int g_port = 8080;
+
+/* Definiciones reales de los tunables declarados extern en cada header
+ * dueno del concepto (core/server.h, config/db.h, utils/auth/*.h); ver
+ * read_long_env() mas abajo para como se resuelven desde el entorno. */
+long g_shutdown_grace_seconds = 5;
+long g_cache_refresh_seconds = 30;
+int g_db_connect_timeout_seconds = 3;
+long g_jwt_expires_seconds = 60L * 60L * 24L; /* 24 horas */
+int g_pbkdf2_iterations = 100000;
+int g_db_pool_size = 16;
+int g_db_pending_queue_size = 8192;
+
+/*
+ * read_long_env - resuelve un entero desde una variable de entorno, con
+ * piso minimo y valor por defecto
+ *
+ * Mismo criterio que read_port_from_env (mas abajo) generalizado: un
+ * valor ausente, no numerico, o por debajo de 'min_value' deja el
+ * default en vez de arrancar con una configuracion inesperada o fallar
+ * mas adelante con un error dificil de rastrear hasta la variable de
+ * entorno.
+ *
+ * Parametros:
+ *   name       - nombre de la variable de entorno
+ *   default_value - valor a usar si falta o es invalida
+ *   min_value  - piso aceptado (inclusive); util para evitar, por
+ *                ejemplo, un JWT_EXPIRES_SECONDS=0 o un
+ *                PBKDF2_ITERATIONS tan bajo que el hash deje de ser
+ *                seguro
+ *
+ * Retorna:
+ *   el valor resuelto (de la variable de entorno o el default)
+ */
+static long read_long_env(const char *name, long default_value, long min_value) {
+    const char *env = getenv(name);
+    if (!env || !*env) return default_value;
+
+    char *end = NULL;
+    long v = strtol(env, &end, 10);
+    if (end == env || *end != '\0' || v < min_value) {
+        fprintf(stderr, "%s invalida ('%s'), usando %ld por defecto\n", name, env, default_value);
+        return default_value;
+    }
+    return v;
+}
 
 /*
  * read_port_from_env - resuelve el puerto de escucha desde la variable
@@ -65,6 +113,30 @@ static void read_port_from_env(void) {
         return;
     }
     g_port = (int)v;
+}
+
+/*
+ * read_tunables_from_env - resuelve todos los tunables operativos desde
+ * el entorno
+ *
+ * Agrupa las lecturas de las variables que no necesitan validacion
+ * especial (a diferencia de PORT y JWT_SECRET, que tienen su propia
+ * funcion): timeouts en segundos, el costo de PBKDF2, y el tamano del
+ * pool de conexiones a Postgres y su cola de espera (config/db.c aloca
+ * la memoria de ambos en init_db(), usando los valores que dejamos acá
+ * ya resueltos). Todas tienen un default razonable para desarrollo
+ * local; se documentan en README.md.
+ */
+static void read_tunables_from_env(void) {
+    g_shutdown_grace_seconds = read_long_env("SHUTDOWN_GRACE_SECONDS", g_shutdown_grace_seconds, 1);
+    g_cache_refresh_seconds = read_long_env("CACHE_REFRESH_SECONDS", g_cache_refresh_seconds, 1);
+    g_db_connect_timeout_seconds = (int)read_long_env("DB_CONNECT_TIMEOUT_SECONDS", g_db_connect_timeout_seconds, 1);
+    g_jwt_expires_seconds = read_long_env("JWT_EXPIRES_SECONDS", g_jwt_expires_seconds, 1);
+    /* Piso de 1000: por debajo de eso PBKDF2 deja de ser un costo
+     * significativo contra fuerza bruta offline si la DB se filtra. */
+    g_pbkdf2_iterations = (int)read_long_env("PBKDF2_ITERATIONS", g_pbkdf2_iterations, 1000);
+    g_db_pool_size = (int)read_long_env("DB_POOL_SIZE", g_db_pool_size, 1);
+    g_db_pending_queue_size = (int)read_long_env("DB_PENDING_QUEUE_SIZE", g_db_pending_queue_size, 0);
 }
 
 /*
@@ -120,6 +192,7 @@ int main() {
 
     read_port_from_env();
     require_jwt_secret();
+    read_tunables_from_env();
 
     /* Una sola vez, antes de que exista ningun hilo: puebla el registro
      * generico de prepared statements que cada init_db() (por hilo) leera. */
