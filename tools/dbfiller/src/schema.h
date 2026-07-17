@@ -1,50 +1,33 @@
+/*
+ * schema.h - representacion en memoria de una tabla de Postgres,
+ * tal como la devuelve introspect.c
+ *
+ * DESCRIPCION
+ *     Deliberadamente no modela foreign keys ni enums: el generador de
+ *     CRUD (codegen.c) no los necesita (ver tools/dbfiller/README.md /
+ *     el plan de esta sesion) - una columna FK viaja como cualquier
+ *     otro parametro de texto, y si viola la constraint Postgres
+ *     devuelve error, que el endpoint generado mapea a 409.
+ */
 #ifndef DBFILLER_SCHEMA_H
 #define DBFILLER_SCHEMA_H
 
-#include <stddef.h>
-
-typedef enum {
-    SQL_TYPE_INT,
-    SQL_TYPE_BIGINT,
-    SQL_TYPE_REAL,
-    SQL_TYPE_TEXT,
-    SQL_TYPE_VARCHAR,
-    SQL_TYPE_BOOL,
-    SQL_TYPE_DATE,
-    SQL_TYPE_DATETIME,
-    SQL_TYPE_ENUM,
-    SQL_TYPE_BLOB,
-    SQL_TYPE_UNKNOWN
-} SqlType;
-
-#define MAX_ENUM_VALUES 32
 #define MAX_NAME_LEN 128
+#define MAX_COLUMNS 256
 
 typedef struct {
     char name[MAX_NAME_LEN];
-    SqlType sql_type;
-    int varchar_len;       /* only meaningful for SQL_TYPE_VARCHAR, 0 = unbounded */
-
+    char data_type[MAX_NAME_LEN]; /* udt_name/data_type de information_schema, solo informativo (va en comentarios) */
     int nullable;
+    int has_default;   /* column_default IS NOT NULL: excluida de INSERT/UPDATE, ver codegen.c */
     int is_pk;
-    int is_autoincrement;
-    int is_unique;
-
-    int has_enum;
-    char enum_values[MAX_ENUM_VALUES][MAX_NAME_LEN];
-    int enum_count;
-
-    int has_fk;
-    char fk_table[MAX_NAME_LEN];
-    char fk_column[MAX_NAME_LEN];
-} DbColumn;
+} PgColumn;
 
 typedef struct {
     char name[MAX_NAME_LEN];
-    DbColumn *columns;
+    PgColumn columns[MAX_COLUMNS];
     int column_count;
-} DbTable;
-
-void db_table_free(DbTable *table);
+    int pk_index; /* indice en columns[] de la (unica) PK, -1 si no hay o hay mas de una */
+} PgTable;
 
 #endif

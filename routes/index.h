@@ -16,6 +16,10 @@
 #include "../controllers/sakila.h"
 #include "../controllers/home.h"
 #include "../controllers/auth.h"
+/* Punto de insercion de tools/dbfiller: cada tabla generada agrega su
+ * propio #include "../controllers/<tabla>.h" justo antes de esta linea
+ * (ver tools/dbfiller/src/repo_patch.c). No borrar este comentario. */
+/* dbfiller:includes-point */
 /*
  * init_routes - llena la tabla de rutas del hilo actual
  *
@@ -37,6 +41,11 @@ static inline void init_routes() {
      * handler. Plantilla para cualquier endpoint que necesite saber
      * quien es el usuario autenticado. */
     get_auth("/api/me", me);
+
+    /* Punto de insercion de tools/dbfiller: cada tabla generada agrega
+     * aca su propio bloque get()/post_auth()/put_auth()/del_auth() (ver
+     * tools/dbfiller/src/repo_patch.c). No borrar este comentario. */
+    /* dbfiller:routes-point */
 
     /* Documentacion interactiva de la API (Swagger UI, vendorizado en
      * docs-ui/), servida como contenido estatico plano — no lleva

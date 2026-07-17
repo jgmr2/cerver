@@ -1,109 +1,99 @@
-# dbfiller — Generador Inteligente de Inserciones para Bases de Datos
+# dbfiller — generador de endpoints CRUD para cerver
 
-Programa que se conecta a una base de datos, detecta automáticamente la
-estructura de sus tablas (columnas, tipos de dato, llaves primarias y
-foráneas, restricciones NOT NULL/ENUM/UNIQUE, etc.) y genera e inserta datos
-de prueba coherentes con esa estructura, sin que tengas que escribirlos a
-mano.
+CLI que se conecta a la base PostgreSQL del backend (`cerver`, la raíz de este
+repo), lee la estructura real de una tabla (columnas, tipos, NOT NULL,
+UNIQUE, PRIMARY KEY) y genera el código C de un endpoint CRUD completo para
+esa tabla — siguiendo los mismos patrones que ya usan `controllers/sakila.c`,
+`models/users.c` y `routes/index.h` (prepared statements asíncronos vía
+`config/db.h`, `row_to_json`/`json_agg` armado en SQL, rutas `get()`/
+`post_auth()`/etc.) — en vez de escribirlo a mano cada vez que aparece una
+tabla nueva.
 
-Incluye dos formas de usarlo:
+Solo Postgres, solo Linux, solo CLI. (Este archivo tuvo versiones anteriores
+para SQLite/MySQL/MariaDB con GUI y cross-compile a Windows más una función de
+llenar tablas con datos falsos — todo eso se descartó a favor de este objetivo
+más chico y concreto: generar endpoints, no datos.)
 
-- **Aplicación de escritorio (GUI)** — ventana con botones, pensada para
-  cualquier usuario, sin necesidad de usar la terminal.
-- **Línea de comandos (CLI)** — pensada para scripts o uso avanzado.
+## Qué genera
 
-Motores de base de datos soportados: **SQLite** y **MySQL / MariaDB**.
+Por cada tabla `<tabla>`:
 
-## Descarga rápida (recomendado para la mayoría de usuarios)
+- `controllers/<tabla>.c/.h` — handlers HTTP: `list_<tabla>`, `get_<tabla>`,
+  `create_<tabla>`, `update_<tabla>` (si la tabla tiene alguna columna
+  actualizable), `delete_<tabla>`.
+- `models/<tabla>.c/.h` — prepared statements y las funciones
+  `<Tabla>_*_async` que los disparan (mismo patrón que `models/sakila.c`).
+- Una entrada en `routes/index.h`:
+  - `GET /api/<tabla>` y `GET /api/<tabla>/:id` — públicas.
+  - `POST /api/<tabla>`, `PUT /api/<tabla>/:id`, `DELETE /api/<tabla>/:id` —
+    exigen JWT válido (`Authorization: Bearer <token>`), igual que `/api/me`.
+- Una entrada en `models/registry.h` (`<tabla>_register()`).
 
-Si solo quieres usar el programa, **no hace falta compilar nada**: descarga
-el binario ya compilado para tu sistema operativo desde la carpeta
-[`build/`](build/) de este repositorio:
+Todo archivo generado empieza con un comentario marcador; si ya existe un
+archivo con ese nombre y **no** tiene el marcador (es decir, lo escribiste vos
+a mano), dbfiller se niega a pisarlo salvo que pases `--force`. Correr
+dbfiller de nuevo sobre la misma tabla actualiza su bloque en `routes/index.h`
+y `models/registry.h` en vez de duplicarlo.
 
-| Sistema | Archivo |
-|---|---|
-| Windows | `build/windows/dbfiller-gui.exe` (con ventana) o `build/windows/dbfiller.exe` (terminal) |
-| Linux | `build/linux/dbfiller-gui` (con ventana) o `build/linux/dbfiller` (terminal) |
+### Limitaciones conocidas (a propósito, no bugs)
 
-En Windows basta con hacer doble clic sobre el `.exe`. En Linux, dale
-permiso de ejecución y ábrelo:
+- Solo tablas con **una** columna PRIMARY KEY. Tablas sin PK o con PK
+  compuesta se saltean con un aviso.
+- No se generan datos de FK ni se valida su existencia en C: una columna FK
+  viaja como cualquier otra (parámetro de texto); si viola la constraint,
+  Postgres devuelve error y el endpoint lo responde como `409`.
+- `GET /api/<tabla>` trae un máximo fijo de 100 filas, sin paginación.
+- Las columnas expuestas en el JSON de list/get/create/update quedan en una
+  única línea fácil de editar (`#define <TABLA>_COLUMNS "..."` al principio
+  de `models/<tabla>.c`) — **revisala antes de compilar** si la tabla tiene
+  alguna columna que no debería exponerse (contraseñas, tokens, etc.).
+- Los valores de texto del body JSON se copian tal cual (sin des-escapar
+  `\"`/`\\`/`\uXXXX`), mismo límite ya aceptado en `controllers/auth.c` — no
+  es una brecha de seguridad porque el valor siempre viaja parametrizado,
+  nunca concatenado a SQL.
 
-```bash
-chmod +x dbfiller-gui
-./dbfiller-gui
-```
+## Uso
 
-## Cómo usar la aplicación de escritorio
-
-1. Abre `dbfiller-gui`.
-2. Elige el **Motor** de base de datos: `SQLite` o `MySQL/MariaDB`.
-   - Para SQLite: escribe la ruta a tu archivo `.db`/`.sqlite` o usa
-     "Examinar..." para buscarlo en tus carpetas.
-   - Para MySQL/MariaDB: llena Host, Puerto, Usuario y Contraseña del
-     servidor al que te quieres conectar.
-3. Presiona **Conectar**. La aplicación leerá automáticamente las tablas
-   existentes y las mostrará en la barra lateral.
-4. Selecciona una tabla para ver su **Estructura** (columnas y tipos) o sus
-   **Registros** actuales.
-5. Escribe cuántas filas quieres generar y presiona **Generar** para
-   llenar esa tabla, o usa **Llenar toda la base de datos** para generar
-   datos en todas las tablas respetando el orden correcto según sus
-   relaciones (llaves foráneas).
-6. También hay una pestaña **SQL** para ejecutar consultas propias, y un
-   botón **Vaciar base de datos** (con confirmación) para borrar todos los
-   registros si quieres empezar de cero.
-
-## Cómo usar la línea de comandos
-
-```bash
-# Contra un archivo SQLite
-dbfiller --sqlite ruta/a/mi_base.db --count 100
-
-# Contra una sola tabla de esa base
-dbfiller --sqlite ruta/a/mi_base.db --table clientes --count 50
-
-# Contra un servidor MySQL/MariaDB
-dbfiller --mysql --host 127.0.0.1 --port 3306 \
-         --user root --password secreta --database tienda --count 200
-```
-
-- Si no se indica `--table`, se generan datos para **todas** las tablas de
-  la base, en el orden correcto según sus relaciones.
-- `--count` indica cuántos registros generar por tabla.
-- `dbfiller --help` muestra esta misma ayuda en pantalla.
-
-## Compilar desde el código fuente
-
-Solo necesario si quieres modificar el programa o no existe un binario
-para tu sistema.
-
-Requisitos (Linux):
-- `gcc`
-- Encabezados de desarrollo de MariaDB/MySQL (paquete `libmariadb-dev` o
-  equivalente) si quieres soporte para MySQL — es opcional, el programa
-  compila igual sin ellos y solo quedará disponible SQLite.
-- Para la versión con ventana (GUI): `libglfw3-dev` y una librería de
-  OpenGL (`libgl1-mesa-dev` o equivalente).
-
-Comandos, desde la raíz del proyecto:
+Correr desde la raíz del repo (o pasar `--repo-root`), con `DATABASE_URL` ya
+definida en el entorno (la misma variable que usa el backend, ver `.env`):
 
 ```bash
-make            # compila la version de terminal para tu sistema actual
-make gui        # compila la version con ventana (Linux)
-make windows    # cross-compila la version de terminal para Windows (requiere mingw-w64)
-make windows-gui  # cross-compila la version con ventana para Windows
-make clean      # borra todo lo compilado (carpeta build/)
+export DATABASE_URL=postgresql://usuario:pass@localhost:5432/mi_base
+
+# Una tabla
+tools/dbfiller/build/dbfiller --table productos
+
+# Todas las tablas del schema 'public'
+tools/dbfiller/build/dbfiller --all
+
+# Sobreescribir archivos generados en una corrida anterior
+tools/dbfiller/build/dbfiller --table productos --force
 ```
 
-Los binarios resultantes quedan en `build/linux/` o `build/windows/`.
+Después de correrlo, revisar el diff (`git diff`) antes de compilar: son
+archivos nuevos en `controllers/`/`models/` más un par de líneas insertadas en
+`routes/index.h`/`models/registry.h`.
 
-## Datos de ejemplo
+## Requisito de setup (una sola vez)
 
-En la carpeta [`data/`](data/) hay archivos CSV de ejemplo
-(clientes, organizaciones, personas, productos) usados como fuente de
-datos realistas para columnas de texto (nombres, correos, empresas, etc.).
+`routes/index.h` y `models/registry.h` necesitan los comentarios-marcador
+`/* dbfiller:includes-point */` y `/* dbfiller:routes-point */` (o
+`/* dbfiller:models-point */`) para que dbfiller sepa dónde insertar cada
+tabla nueva. Ya están agregados en este repo; si algún día se pierden (por
+ejemplo, alguien reescribe esos archivos a mano), dbfiller falla con un error
+explícito indicando cuál falta.
+
+## Compilar
+
+Requisitos (Linux): `gcc` y las cabeceras de desarrollo de PostgreSQL
+(`libpq-dev` en Debian/Ubuntu, o el paquete equivalente de tu distro).
+
+```bash
+cd tools/dbfiller
+make            # build/dbfiller
+make clean
+```
 
 ## Licencia
 
-Este proyecto se distribuye bajo la licencia GPLv3. Ver el archivo
-[LICENSE](LICENSE) para el texto completo.
+GPLv3 — ver [LICENSE](LICENSE).

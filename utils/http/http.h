@@ -85,6 +85,11 @@ typedef enum {
  *   fallback_tried - evita reintentar el fallback SPA mas de una vez
  *   owned_result  - PGresult que este req_t mantiene vivo hasta terminar
  *                   de escribirlo (ver send_res_pgresult_ref)
+ *   heap_body     - copia del body reservada con malloc cuando no entra
+ *                   en buf (ver send_res_bin); NULL si el body uso el
+ *                   buffer inline o no habia body. Se libera junto con
+ *                   owned_result al terminar el write (o al cerrar tras
+ *                   un error de escritura).
  */
 typedef struct {
     event_type_t core_type; req_type_t type; struct io_uring *ring;
@@ -93,6 +98,7 @@ typedef struct {
     struct statx stx; const char *mime;
     int dir_fd, spa_fallback, fallback_tried;
     PGresult *owned_result;
+    char *heap_body;
 } req_t;
 
 /*
@@ -249,9 +255,13 @@ static inline void _rearm_or_close(struct io_uring *ring, int fd) {
 /*
  * send_res_bin - arma y envia una respuesta HTTP completa con body binario
  *
- * Copia el body a un buffer propio del req_t (hasta 8 KB) para que siga
- * vivo hasta que termine el writev asincrono; si no cabe, se manda un
- * error generico en su lugar.
+ * Copia el body a un buffer propio del req_t (hasta 8 KB, sin reservar
+ * memoria) para que siga vivo hasta que termine el writev asincrono; un
+ * body mas grande se copia a un buffer aparte con malloc (r->heap_body,
+ * liberado en http_helper_handle_cqe junto con owned_result) en vez de
+ * descartarse: endpoints que arman resultados grandes (p.ej listados con
+ * muchas filas o columnas anchas, ver tools/dbfiller) no tienen por que
+ * toparse con un limite arbitrario de 8 KB.
  *
  * Parametros:
  *   ring - anillo io_uring del hilo actual
@@ -271,14 +281,23 @@ static inline void send_res_bin(struct io_uring *ring, int fd, const char *s, co
     size_t payload_len = n;
 
     if (b && n) {
-        if (n >= sizeof(r->buf)) {
-            payload = "{\"error\":\"response too large\"}";
-            payload_len = strlen(payload);
-        } else {
+        if (n < sizeof(r->buf)) {
             memcpy(r->buf, b, n);
             r->buf[n] = '\0';
             payload = r->buf;
             payload_len = n;
+        } else {
+            char *heap = malloc(n + 1);
+            if (heap) {
+                memcpy(heap, b, n);
+                heap[n] = '\0';
+                r->heap_body = heap;
+                payload = heap;
+                payload_len = n;
+            } else {
+                payload = "{\"error\":\"out of memory\"}";
+                payload_len = strlen(payload);
+            }
         }
     }
 
@@ -403,7 +422,7 @@ static inline void serve_file_async(struct io_uring *ring, int client_fd, int ro
  *   - cualquier otra fase: cierra el fd del cliente (encadenando por
  *     OP_CLOSE si hiciera falta cerrar tambien el file_fd primero).
  * En exito, avanza segun 'type':
- *   OP_WRITE_RES    -> _rearm_or_close, libera el owned_result si tenia, free(r)
+ *   OP_WRITE_RES    -> _rearm_or_close, libera owned_result/heap_body si tenia, free(r)
  *   OP_OPEN_FILE    -> pide statx sobre el fd recien abierto
  *   OP_STAT_FILE    -> si no es archivo regular, 404; si no, arma y
  *                      escribe la cabecera HTTP (OP_WRITE_HEADER)
@@ -411,7 +430,7 @@ static inline void serve_file_async(struct io_uring *ring, int client_fd, int ro
  *   OP_READ_FILE    -> si ya no hay mas datos (res==0), cierra el
  *                      archivo y decide keep-alive/close; si hay datos,
  *                      los escribe al cliente (OP_WRITE_FILE)
- *   OP_CLOSE        -> libera el owned_result si tenia, free(r)
+ *   OP_CLOSE        -> libera owned_result/heap_body si tenia, free(r)
  *
  * Parametros:
  *   cqe - CQE recibido del anillo io_uring
@@ -460,6 +479,7 @@ static inline void http_helper_handle_cqe(struct io_uring_cqe *cqe) {
         case OP_WRITE_RES:
             _rearm_or_close(ring, r->client_fd);
             if (r->owned_result) PQclear(r->owned_result);
+            free(r->heap_body);
             free(r);
             break;
         case OP_OPEN_FILE:
@@ -500,6 +520,7 @@ static inline void http_helper_handle_cqe(struct io_uring_cqe *cqe) {
             } break;
         case OP_CLOSE:
             if (r->owned_result) PQclear(r->owned_result);
+            free(r->heap_body);
             free(r);
             break;
         default: break;

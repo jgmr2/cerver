@@ -18,10 +18,18 @@
 
 #include "../models/sakila.h"
 #include "../models/users.h"
+/* Punto de insercion de tools/dbfiller: cada tabla generada agrega su
+ * propio #include "../models/<tabla>.h" justo antes de esta linea (ver
+ * tools/dbfiller/src/repo_patch.c). No borrar este comentario. */
+/* dbfiller:includes-point */
 
 static inline void register_models(void) {
     sakila_register();
     users_register();
+    /* Punto de insercion de tools/dbfiller: cada tabla generada agrega
+     * aca su propia llamada a <tabla>_register() (ver
+     * tools/dbfiller/src/repo_patch.c). No borrar este comentario. */
+    /* dbfiller:models-point */
 }
 
 #endif
