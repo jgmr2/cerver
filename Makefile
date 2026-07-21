@@ -18,16 +18,16 @@ BIN_NAME  := app
 
 # --- BUSQUEDA RECURSIVA ---
 # Encuentra todos los archivos .c en el directorio actual y subdirectorios.
-# tools/ queda afuera: tools/dbfiller es un binario aparte con su propio
-# Makefile (tools/dbfiller/Makefile) y su propio main() - incluirlo aca
-# choca con el main() de este binario.
-SRCS := $(shell find . -name "*.c" ! -path "./$(BUILD_DIR)/*" ! -path "./tools/*")
+# tools/ y tests/ quedan afuera: tools/dbfiller y tests/unit son binarios
+# aparte con su propio main() (tools/dbfiller/Makefile,
+# tests/unit/Makefile) - incluirlos aca choca con el main() de este binario.
+SRCS := $(shell find . -name "*.c" ! -path "./$(BUILD_DIR)/*" ! -path "./tools/*" ! -path "./tests/*")
 # Genera la lista de objetos en la carpeta build preservando estructura
 OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o)
 
 # Búsqueda de headers: Incluimos todas las carpetas que contienen archivos .h
 # Esto evita tener que usar rutas relativas largas como ../../ en los #include
-INCLUDES := $(sort $(dir $(shell find . -name "*.h" ! -path "./$(BUILD_DIR)/*" ! -path "./tools/*")))
+INCLUDES := $(sort $(dir $(shell find . -name "*.h" ! -path "./$(BUILD_DIR)/*" ! -path "./tools/*" ! -path "./tests/*")))
 INCLUDE_FLAGS := -I. $(addprefix -I, $(INCLUDES)) -I/usr/include/postgresql -I/usr/include
 
 # Librerías

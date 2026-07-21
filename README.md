@@ -38,6 +38,20 @@ Todo lo demás es configurable por variable de entorno con un default razonable 
 
 **SYN flood**: no se mitiga en este repo porque no se puede — es un ataque contra el handshake TCP, antes de que un solo byte llegue a `cerver`. En AWS, EC2 ya tiene protección automática y gratuita contra esto (AWS Shield Standard, activo por default en toda IP pública/Elastic IP, sin configurar nada). A nivel de kernel, `tcp_syncookies` viene en `1` por default en las distros Linux habituales (Ubuntu, Debian, Amazon Linux) — verificarlo en la AMI real (`cat /proc/sys/net/ipv4/tcp_syncookies`) antes de desplegar, no asumirlo. Deliberadamente NO se fuerza vía `sysctls:` en `docker-compose.yml`: con el `userland-proxy` de Docker activo (el default — ver el hallazgo de `MAX_CONN_PER_IP` más arriba), el socket que realmente recibe el handshake TCP público es el del **host**, no el del namespace del contenedor — un sysctl seteado ahí sería puro placebo. Si algún día se desactiva `userland-proxy` (hairpin NAT por iptables), ahí sí pasa a importar el sysctl del contenedor, y hay que revisitar esto.
 
+## Tests
+
+```bash
+# unitarios (funciones puras del router/estáticos) — necesita liburing-dev,
+# libpq-dev, libssl-dev instalados (o correrlo dentro de un contenedor
+# Alpine con esas libs, ver el job "test" de docker-image.yml)
+make -C tests/unit test
+
+# integración, contra el stack real (requiere docker compose up -d primero)
+python3 tests/integration/test_integration.py
+```
+
+El workflow de CI (`.github/workflows/docker-image.yml`) corre ambos antes de publicar la imagen — si fallan, no se hace `build-and-push`.
+
 Ver `/docs` (Swagger UI) para el detalle de cada endpoint, y [TODO.md](TODO.md) para qué está resuelto y qué falta antes de usar esto en producción real.
 
 ## Créditos de terceros

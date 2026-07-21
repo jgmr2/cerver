@@ -5,7 +5,48 @@ on:
     branches: [ "main" ]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Tests unitarios (funciones puras)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential liburing-dev libpq-dev libssl-dev
+          make -C tests/unit test
+
+      - name: Levantar el stack real (backend + Postgres) para el test de integración
+        run: |
+          cat > .env <<EOF
+          POSTGRES_USER=ci
+          POSTGRES_PASSWORD=$(openssl rand -hex 16)
+          POSTGRES_DB=ci_test
+          JWT_SECRET=$(openssl rand -hex 32)
+          DB_POOL_SIZE=1
+          # max_connections=20 en docker-compose.yml está pensado para 2 vCPU
+          # (target real: t4g). El runner de CI puede tener más cores que eso
+          # (cerver arranca un hilo por vCPU) — con DB_POOL_SIZE=1, aunque el
+          # runner tenga 8+ cores, el total de conexiones queda muy por debajo
+          # de 20. Confirmado necesario: sin esto, en un runner de 8 cores el
+          # backend entraba en crash-loop por "too many clients already".
+          EOF
+          docker compose up -d --build
+
+      - name: Test de integración contra el stack real
+        run: python3 tests/integration/test_integration.py
+
+      - name: Logs (solo si algo falló arriba)
+        if: failure()
+        run: docker compose logs
+
+      - name: Bajar el stack
+        if: always()
+        run: docker compose down -v
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

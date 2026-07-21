@@ -12,13 +12,41 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
   Probado end-to-end: `/healthz`, `/api`, registro y login funcionando
   con las credenciales nuevas.~~
 
-- [ ] **Testing: hoy cero.** Sin esto, cualquier cambio futuro (incluido todo
-      lo de esta sesión) no tiene red de seguridad automática. Mínimo viable:
-      tests de integración contra una Postgres de prueba, un job en
-      `docker-image.yml` que corra antes de publicar, y tests unitarios para
-      las funciones puras fáciles de aislar (`url_decode_path`,
-      `path_has_hidden_segment`, `path_looks_like_asset`, `mime_type_for_path`,
-      `path_is_api`).
+- [x] ~~**Testing: de cero a un mínimo viable real.** `tests/unit/` — 26
+  tests de las funciones puras (`url_decode_path`, `path_has_hidden_segment`,
+  `path_looks_like_asset`, `mime_type_for_path`, `path_is_api`), incluyendo
+  las cabeceras reales del motor, no una reimplementación. `tests/integration/`
+  — 23 tests contra el stack real (Docker + Postgres): flujo completo de
+  auth, guardrail IDOR, rate-limit de login, `413`/`400` de protocolo,
+  fallback SPA vs `404` de `/api`. `.github/workflows/docker-image.yml`
+  ahora tiene un job `test` que corre ambos y bloquea `build-and-push` si
+  falla (`needs: test`).
+  Probado que el test de integración detecta una regresión de verdad, no
+  solo que pasa cuando todo está bien: deshabilité a propósito el guardrail
+  de IDOR, el test lo agarró exacto (`403` esperado, `200` real), y lo
+  revertí después.
+  **Encontrado en el camino armando la simulación de CI (checkout limpio,
+  sin el `.env`/volúmenes ya calentados de esta sesión):**
+  - El `Makefile` principal usa `find` recursivo para `.c` — al agregar
+    `tests/unit/`, empezó a arrastrar su `main()` y chocaba con el
+    `main()` real. Excluido `tests/` del glob, igual que ya excluía `tools/`.
+  - `DB_POOL_SIZE` default (4) más `max_connections=20` (pensado para 2
+    vCPU) revienta en cualquier runner con más cores — confirmado en este
+    mismo host de 8 cores. Fijado `DB_POOL_SIZE=1` explícito en el paso de
+    CI para que no dependa de cuántos cores le toquen al runner.
+  - **Bug real y preexistente, no de esta sesión:**
+    `db/init/02_postgres-sakila-schema.sql` seguía físicamente en el repo
+    pese a que este mismo archivo ya decía "resuelto sacando Sakila del
+    todo" más abajo — sobre un volumen de Postgres fresco (como arranca
+    cualquier CI real) fallaba con `role "postgres" does not exist`
+    porque el script asume ese nombre de rol y `POSTGRES_USER` es otro.
+    Confirmado sin ninguna referencia en código (`grep`) y eliminado.
+    Esto llevaba probablemente toda la sesión fallando en silencio contra
+    el volumen de Postgres del entorno de desarrollo, sin notarse porque
+    los scripts de init solo corren una vez, contra un volumen vacío.
+  Regresión final, simulando un checkout de CI genuinamente limpio (clon
+  aparte, sin `.env`, sin volúmenes previos): 23/23 tests de integración
+  ok, `RestartCount=0`.~~
 - [ ] **`X-Forwarded-For` en `conn_limit`/`login_limit`, para cuando se
       configure nginx.** Decisión de esta sesión: no vale la pena arreglar
       `userland-proxy` de Docker a nivel de host, porque con nginx delante
