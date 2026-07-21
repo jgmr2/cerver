@@ -40,6 +40,7 @@
 #include <stdlib.h>
 #include <poll.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Estados posibles del campo db_t.b. */
 #define DB_FREE     0
@@ -486,6 +487,43 @@ error:
  * Parametros:
  *   r - anillo io_uring del hilo actual, guardado en cada db_t del pool
  */
+/*
+ * connect_with_retry - PQconnectdb con reintentos acotados, solo para el
+ * arranque del pool (ver g_db_startup_retry_attempts, config/db.h)
+ *
+ * No reemplaza a reconnect_if_dead (mas abajo): esa reconecta una
+ * conexion que ya estaba viva y se cayo en caliente, en el hot path de
+ * cada consulta; esta es exclusiva del arranque del hilo, antes de que
+ * exista ningun pool, y bloquea con sleep() a proposito — corre una sola
+ * vez por conexion, antes de que el hilo entre al loop de io_uring,
+ * mismo criterio que el open() bloqueante de mount_static
+ * (utils/http/static.h).
+ *
+ * Parametros:
+ *   conninfo - connection string ya armado (build_conninfo_with_timeout)
+ *
+ * Retorna:
+ *   la conexion lograda (PQstatus == CONNECTION_OK) dentro del
+ *   presupuesto de reintentos, o la ultima conexion fallida si se
+ *   agotaron todos los intentos (el caller debe volver a chequear
+ *   PQstatus antes de usarla).
+ */
+static PGconn *connect_with_retry(const char *conninfo) {
+    PGconn *conn = NULL;
+    for (int attempt = 1; attempt <= g_db_startup_retry_attempts; attempt++) {
+        if (conn) PQfinish(conn);
+        conn = PQconnectdb(conninfo);
+        if (PQstatus(conn) == CONNECTION_OK) return conn;
+
+        if (attempt < g_db_startup_retry_attempts) {
+            fprintf(stderr, "WARN: intento %d/%d de conexion a DB fallo (%s), reintentando en %ds...\n",
+                    attempt, g_db_startup_retry_attempts, PQerrorMessage(conn), g_db_startup_retry_delay_seconds);
+            sleep((unsigned int)g_db_startup_retry_delay_seconds);
+        }
+    }
+    return conn;
+}
+
 void init_db(struct io_uring *r) {
     char *u = getenv("DATABASE_URL");
     if (!u) {
@@ -513,9 +551,10 @@ void init_db(struct io_uring *r) {
     free_count = 0;
 
     for (int i = 0; i < g_db_pool_size; i++) {
-        PGconn *conn = PQconnectdb(conninfo);
+        PGconn *conn = connect_with_retry(conninfo);
         if (PQstatus(conn) != CONNECTION_OK) {
-            fprintf(stderr, "FATAL: Error conectando a DB: %s\n", PQerrorMessage(conn));
+            fprintf(stderr, "FATAL: Error conectando a DB tras %d intentos: %s\n",
+                    g_db_startup_retry_attempts, PQerrorMessage(conn));
             exit(1);
         }
 

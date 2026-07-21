@@ -56,6 +56,27 @@ extern int g_db_pending_queue_size;
 extern int g_db_connect_timeout_seconds;
 
 /*
+ * g_db_startup_retry_attempts / g_db_startup_retry_delay_seconds - cuantas
+ * veces (y con que espera entre intento e intento) init_db() reintenta la
+ * conexion inicial a Postgres antes de darse por vencido (config/db.c)
+ *
+ * Variables de entorno DB_STARTUP_RETRY_ATTEMPTS (default 10) y
+ * DB_STARTUP_RETRY_DELAY_SECONDS (default 2). Sin esto, si el backend se
+ * reinicia solo (restart: unless-stopped, docker-compose.yml) justo
+ * cuando Postgres todavia no paso su healthcheck (p.ej. ambos
+ * contenedores reiniciaron juntos), init_db() haria exit(1) de
+ * inmediato — el proceso quedaria en crash-loop hasta que, por pura
+ * casualidad de timing, la DB estuviera arriba en el instante exacto de
+ * un reintento de Docker. El presupuesto por defecto (10 x 2s = 20s)
+ * cubre el peor caso del healthcheck de `db` en docker-compose.yml
+ * (interval 2s, retries 10). No reemplaza a reconnect_if_dead (esa es
+ * para una conexion que ya estaba viva y se cayo en caliente); esto es
+ * solo para el arranque del hilo, antes de que exista ningun pool.
+ */
+extern int g_db_startup_retry_attempts;
+extern int g_db_startup_retry_delay_seconds;
+
+/*
  * cb - callback invocado cuando una consulta asincrona termina
  *
  * Parametros:

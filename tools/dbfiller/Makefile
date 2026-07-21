@@ -3,7 +3,7 @@ CC ?= gcc
 # Compartido por el CLI y la GUI: toda la logica real (introspeccion,
 # codegen, patch de routes/registry, orquestacion) vive aca, sin nada
 # atado a stdio ni a argv - ver src/generate.h.
-CORE_SRC := src/introspect.c src/codegen.c src/repo_patch.c src/generate.c
+CORE_SRC := src/introspect.c src/codegen.c src/repo_patch.c src/generate.c src/scaffold.c
 
 SRC := src/main.c $(CORE_SRC)
 CFLAGS := -Wall -Wextra -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -I/usr/include/postgresql -I/usr/include

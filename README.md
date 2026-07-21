@@ -19,6 +19,7 @@ Nace para un caso de uso concreto: backends a medida para pequeñas empresas, co
 - Servidor de estáticos con fallback SPA, protegido contra path traversal.
 - Documentación interactiva de la API en `/docs` (Swagger UI).
 - Apagado graceful, healthcheck separado del chequeo de DB, headers de seguridad, mitigación de slowloris y de HTTP request smuggling.
+- Perfil de seccomp propio (`seccomp-cerver.json`, ver `TODO.md`) — default de Docker más `io_uring_*`, no `unconfined`.
 
 ## Puesta en marcha
 
@@ -29,7 +30,13 @@ docker compose up -d
 curl http://localhost:8080/healthz
 ```
 
-Todo lo demás es configurable por variable de entorno con un default razonable si no se define — `PORT`, `SHUTDOWN_GRACE_SECONDS`, `CACHE_REFRESH_SECONDS`, `DB_CONNECT_TIMEOUT_SECONDS`, `JWT_EXPIRES_SECONDS`, `PBKDF2_ITERATIONS`, `DB_POOL_SIZE`, `DB_PENDING_QUEUE_SIZE` (ver `docker-compose.yml` y `.env`) — nada de esto requiere recompilar para ajustarlo por deployment.
+Todo lo demás es configurable por variable de entorno con un default razonable si no se define — `PORT`, `SHUTDOWN_GRACE_SECONDS`, `CACHE_REFRESH_SECONDS`, `DB_CONNECT_TIMEOUT_SECONDS`, `DB_STARTUP_RETRY_ATTEMPTS`, `DB_STARTUP_RETRY_DELAY_SECONDS`, `JWT_EXPIRES_SECONDS`, `PBKDF2_ITERATIONS`, `DB_POOL_SIZE`, `DB_PENDING_QUEUE_SIZE`, `MAX_CONNECTIONS`, `MAX_CONN_PER_IP` (ver `docker-compose.yml` y `.env`) — nada de esto requiere recompilar para ajustarlo por deployment.
+
+`MAX_CONNECTIONS` (default 4096) y `MAX_CONN_PER_IP` (default 100) limitan conexiones TCP concurrentes, global y por IP de origen, para mitigar agotamiento de conexiones (CWE-770) cuando el backend recibe tráfico directo sin proxy delante — ver `utils/net/conn_limit.h`. Si en algún momento vuelve a haber un proxy delante, todas las conexiones van a llegar con la IP de ese proxy: `MAX_CONN_PER_IP` hay que subirlo (o dejarlo por encima de `MAX_CONNECTIONS`) para no auto-limitarse.
+
+`LOGIN_MAX_ATTEMPTS` (default 10) y `LOGIN_WINDOW_SECONDS` (default 60) limitan intentos fallidos de login por IP en `POST /api/auth/login`, para mitigar fuerza bruta/credential stuffing — ver `utils/auth/login_limit.h`. Igual que `MAX_CONN_PER_IP`, este límite pierde precisión si el backend queda detrás de un proxy que colapsa la IP de origen.
+
+**SYN flood**: no se mitiga en este repo porque no se puede — es un ataque contra el handshake TCP, antes de que un solo byte llegue a `cerver`. En AWS, EC2 ya tiene protección automática y gratuita contra esto (AWS Shield Standard, activo por default en toda IP pública/Elastic IP, sin configurar nada). A nivel de kernel, `tcp_syncookies` viene en `1` por default en las distros Linux habituales (Ubuntu, Debian, Amazon Linux) — verificarlo en la AMI real (`cat /proc/sys/net/ipv4/tcp_syncookies`) antes de desplegar, no asumirlo. Deliberadamente NO se fuerza vía `sysctls:` en `docker-compose.yml`: con el `userland-proxy` de Docker activo (el default — ver el hallazgo de `MAX_CONN_PER_IP` más arriba), el socket que realmente recibe el handshake TCP público es el del **host**, no el del namespace del contenedor — un sysctl seteado ahí sería puro placebo. Si algún día se desactiva `userland-proxy` (hairpin NAT por iptables), ahí sí pasa a importar el sysctl del contenedor, y hay que revisitar esto.
 
 Ver `/docs` (Swagger UI) para el detalle de cada endpoint, y [TODO.md](TODO.md) para qué está resuelto y qué falta antes de usar esto en producción real.
 

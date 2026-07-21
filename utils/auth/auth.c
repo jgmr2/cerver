@@ -18,8 +18,10 @@
 #include "users.h"
 #include "../http/router.h"
 #include "../http/http.h"
+#include "../net/conn_limit.h"
 #include "password.h"
 #include "jwt.h"
+#include "login_limit.h"
 
 /* g_jwt_expires_seconds (utils/auth/jwt.h, variable de entorno
  * JWT_EXPIRES_SECONDS) reemplaza lo que antes era un #define fijo aca. */
@@ -144,12 +146,21 @@ void register_user(struct io_uring *r, int f, const char *m, const char *b) {
     if (!parse_credentials(b, username, sizeof(username), password, sizeof(password)) ||
         !username_is_valid(username, strlen(username)) ||
         strlen(password) < 8) {
+        explicit_bzero(password, sizeof(password));
         send_res(r, f, "400 Bad Request", "text/plain", "400");
         return;
     }
 
     char hash[PASSWORD_HASH_BUF_SIZE];
-    if (!password_hash(password, hash, sizeof(hash))) {
+    int hashed = password_hash(password, hash, sizeof(hash));
+    /* La contraseña en texto plano ya cumplio su unico proposito (armar
+     * el hash); no tiene sentido que seudo-siga viva en el stack de este
+     * frame hasta que la funcion retorne — explicit_bzero (a diferencia
+     * de memset) esta garantizado a no ser optimizado fuera por el
+     * compilador, justamente pensado para este caso de "borrar un
+     * secreto que ya no se usa mas". */
+    explicit_bzero(password, sizeof(password));
+    if (!hashed) {
         send_res(r, f, "500 Internal Server Error", "text/plain", "500");
         return;
     }
@@ -165,22 +176,37 @@ void register_user(struct io_uring *r, int f, const char *m, const char *b) {
 }
 
 /* Contexto que login_user necesita conservar hasta que la busqueda
- * termine: username (para el claim del JWT) y la contrasena en texto
- * plano (para verificarla contra el hash que devuelva la consulta). */
+ * termine: username (para el claim del JWT), la contrasena en texto
+ * plano (para verificarla contra el hash que devuelva la consulta) y la
+ * IP de origen (para login_limit_record_failure/_success, ver
+ * utils/auth/login_limit.h — capturada una sola vez al entrar, no hace
+ * falta volver a consultarla en el callback). */
 typedef struct {
     char username[64];
     char password[128];
+    uint32_t ip;
 } login_ctx_t;
+
+/* free_login_ctx - borra la contrasena en texto plano antes de liberar
+ * el contexto (ver el mismo razonamiento en register_user de mas
+ * arriba); unico punto de free() de login_ctx_t, para no repetir el
+ * explicit_bzero en cada rama de salida de on_user_found_for_login. */
+static void free_login_ctx(login_ctx_t *ctx) {
+    explicit_bzero(ctx->password, sizeof(ctx->password));
+    free(ctx);
+}
 
 static int on_user_found_for_login(struct io_uring *r, int client_fd, PGresult *res, void *userdata) {
     login_ctx_t *ctx = (login_ctx_t *)userdata;
 
     /* Misma respuesta (401) tanto si el usuario no existe como si la
      * contrasena no coincide: no hay que dejarle saber a quien intenta
-     * entrar si el username que probo existe o no. */
+     * entrar si el username que probo existe o no. Ambas ramas cuentan
+     * como intento fallido para login_limit (utils/auth/login_limit.h). */
     if (!res || PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) < 1) {
+        login_limit_record_failure(ctx->ip);
         send_res(r, client_fd, "401 Unauthorized", "text/plain", "401");
-        free(ctx);
+        free_login_ctx(ctx);
         return 0;
     }
 
@@ -188,27 +214,41 @@ static int on_user_found_for_login(struct io_uring *r, int client_fd, PGresult *
     const char *stored_hash = PQgetvalue(res, 0, 1);
 
     if (!password_verify(ctx->password, stored_hash)) {
+        login_limit_record_failure(ctx->ip);
         send_res(r, client_fd, "401 Unauthorized", "text/plain", "401");
-        free(ctx);
+        free_login_ctx(ctx);
         return 0;
     }
 
+    login_limit_record_success(ctx->ip);
     issue_token_response(r, client_fd, id_str, ctx->username);
-    free(ctx);
+    free_login_ctx(ctx);
     return 0;
 }
 
 void login_user(struct io_uring *r, int f, const char *m, const char *b) {
     (void)m;
 
+    /* Se chequea ANTES de parsear el body o tocar la base de datos: una
+     * IP que ya agoto su cupo (utils/auth/login_limit.h) no debe hacer
+     * que este proceso gaste ciclos en JSON parsing, y mucho menos en
+     * PBKDF2 (password_verify) o un round-trip a Postgres — exactamente
+     * el costo que un ataque de fuerza bruta esta tratando de imponer. */
+    uint32_t ip = conn_limit_get_ip(f);
+    if (!login_limit_allowed(ip)) {
+        send_res(r, f, "429 Too Many Requests", "text/plain", "429");
+        return;
+    }
+
     login_ctx_t *ctx = calloc(1, sizeof(login_ctx_t));
     if (!ctx) {
         send_res(r, f, "500 Internal Server Error", "text/plain", "500");
         return;
     }
+    ctx->ip = ip;
 
     if (!parse_credentials(b, ctx->username, sizeof(ctx->username), ctx->password, sizeof(ctx->password))) {
-        free(ctx);
+        free_login_ctx(ctx);
         send_res(r, f, "400 Bad Request", "text/plain", "400");
         return;
     }

@@ -41,6 +41,8 @@
 #include "config/db.h"
 #include "utils/auth/jwt.h"
 #include "utils/auth/password.h"
+#include "utils/auth/login_limit.h"
+#include "utils/net/conn_limit.h"
 
 /* Definicion real de la bandera declarada extern en utils/events.h. */
 volatile sig_atomic_t g_shutdown = 0;
@@ -54,10 +56,29 @@ int g_port = 8080;
 long g_shutdown_grace_seconds = 5;
 long g_cache_refresh_seconds = 30;
 int g_db_connect_timeout_seconds = 3;
+int g_db_startup_retry_attempts = 10;
+int g_db_startup_retry_delay_seconds = 2;
 long g_jwt_expires_seconds = 60L * 60L * 24L; /* 24 horas */
 int g_pbkdf2_iterations = 100000;
 int g_db_pool_size = 16;
 int g_db_pending_queue_size = 8192;
+/* Definiciones reales de los topes de utils/net/conn_limit.h. Default
+ * pensado para una instancia chica (ver README.md, "AWS baratas"): 4096
+ * conexiones totales por proceso alcanzan de sobra para trafico legitimo
+ * y siguen siendo un tope real bien por debajo de NOFILE (65536, ver
+ * docker-compose.yml); 100 por IP es generoso para un cliente real
+ * (varias pestañas/keep-alive) pero corta un abuso concentrado antes de
+ * que agote fds o memoria (CWE-770). Advertencia si se vuelve a poner un
+ * proxy delante: ver el comentario de MAX_CONN_PER_IP en conn_limit.h. */
+long g_max_global_connections = 4096;
+int g_max_conn_per_ip = 100;
+/* Definiciones reales de los topes de utils/auth/login_limit.h. Default:
+ * 10 intentos fallidos por IP cada 60 segundos — bajo lo suficiente para
+ * cortar fuerza bruta (cientos de miles de intentos/minuto sin esto) sin
+ * bloquear a un usuario real que se equivoca de contraseña un par de
+ * veces. */
+long g_login_max_attempts = 10;
+long g_login_window_seconds = 60;
 
 /*
  * read_long_env - resuelve un entero desde una variable de entorno, con
@@ -131,12 +152,18 @@ static void read_tunables_from_env(void) {
     g_shutdown_grace_seconds = read_long_env("SHUTDOWN_GRACE_SECONDS", g_shutdown_grace_seconds, 1);
     g_cache_refresh_seconds = read_long_env("CACHE_REFRESH_SECONDS", g_cache_refresh_seconds, 1);
     g_db_connect_timeout_seconds = (int)read_long_env("DB_CONNECT_TIMEOUT_SECONDS", g_db_connect_timeout_seconds, 1);
+    g_db_startup_retry_attempts = (int)read_long_env("DB_STARTUP_RETRY_ATTEMPTS", g_db_startup_retry_attempts, 1);
+    g_db_startup_retry_delay_seconds = (int)read_long_env("DB_STARTUP_RETRY_DELAY_SECONDS", g_db_startup_retry_delay_seconds, 0);
     g_jwt_expires_seconds = read_long_env("JWT_EXPIRES_SECONDS", g_jwt_expires_seconds, 1);
     /* Piso de 1000: por debajo de eso PBKDF2 deja de ser un costo
      * significativo contra fuerza bruta offline si la DB se filtra. */
     g_pbkdf2_iterations = (int)read_long_env("PBKDF2_ITERATIONS", g_pbkdf2_iterations, 1000);
     g_db_pool_size = (int)read_long_env("DB_POOL_SIZE", g_db_pool_size, 1);
     g_db_pending_queue_size = (int)read_long_env("DB_PENDING_QUEUE_SIZE", g_db_pending_queue_size, 0);
+    g_max_global_connections = read_long_env("MAX_CONNECTIONS", g_max_global_connections, 1);
+    g_max_conn_per_ip = (int)read_long_env("MAX_CONN_PER_IP", g_max_conn_per_ip, 1);
+    g_login_max_attempts = read_long_env("LOGIN_MAX_ATTEMPTS", g_login_max_attempts, 1);
+    g_login_window_seconds = read_long_env("LOGIN_WINDOW_SECONDS", g_login_window_seconds, 1);
 }
 
 /*

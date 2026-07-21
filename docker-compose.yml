@@ -1,16 +1,22 @@
 services:
   db:
     image: postgres:16-alpine
-    # COMANDO DE TUNEO CRÍTICO
+    # COMANDO DE TUNEO — producción de un solo cliente chico en instancia
+    # barata (t4g.small, 2GB), no el benchmark de carga que tenía antes.
+    # DB_POOL_SIZE=4 (ver environment de "backend" mas abajo) x N hilos
+    # (= vCPUs de la instancia) es el consumo real esperado de
+    # conexiones; max_connections deja margen para eso mas un cliente de
+    # administracion, no para las miles de conexiones de un servidor
+    # compartido multi-tenant.
     command: [
       "postgres",
-      "-c", "max_connections=2000",       # Subimos de 100 a 2000
-      "-c", "shared_buffers=1GB",         # Aumenta según tu RAM (25% de la RAM total)
-      "-c", "effective_cache_size=3GB",   # 75% de la RAM total
-      "-c", "work_mem=16MB",              # RAM por cada operación de ordenamiento
-      "-c", "maintenance_work_mem=256MB", 
-      "-c", "min_wal_size=1GB",
-      "-c", "max_wal_size=4GB"
+      "-c", "max_connections=20",         # antes 2000: sobraba para 1 cliente chico
+      "-c", "shared_buffers=128MB",       # antes 1GB: minimo que evita cache-thrashing sin acaparar la instancia
+      "-c", "effective_cache_size=384MB", # antes 3GB: ~3x shared_buffers, no "75% de RAM total" (esta compartida con el backend y el SO)
+      "-c", "work_mem=4MB",               # antes 16MB: es por operacion de ordenamiento POR conexion, se multiplica
+      "-c", "maintenance_work_mem=64MB",  # antes 256MB: solo importa en VACUUM/CREATE INDEX, infrecuente en este volumen
+      "-c", "min_wal_size=80MB",          # antes 1GB
+      "-c", "max_wal_size=256MB"          # antes 4GB
     ]
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -49,17 +55,32 @@ services:
       - SHUTDOWN_GRACE_SECONDS=${SHUTDOWN_GRACE_SECONDS:-5}
       - CACHE_REFRESH_SECONDS=${CACHE_REFRESH_SECONDS:-30}
       - DB_CONNECT_TIMEOUT_SECONDS=${DB_CONNECT_TIMEOUT_SECONDS:-3}
+      - DB_STARTUP_RETRY_ATTEMPTS=${DB_STARTUP_RETRY_ATTEMPTS:-10}
+      - DB_STARTUP_RETRY_DELAY_SECONDS=${DB_STARTUP_RETRY_DELAY_SECONDS:-2}
       - JWT_EXPIRES_SECONDS=${JWT_EXPIRES_SECONDS:-86400}
       - PBKDF2_ITERATIONS=${PBKDF2_ITERATIONS:-100000}
-      - DB_POOL_SIZE=${DB_POOL_SIZE:-16}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-4} # antes 16: x N hilos (1 por vCPU) da el total de conexiones a Postgres, ver max_connections arriba
       - DB_PENDING_QUEUE_SIZE=${DB_PENDING_QUEUE_SIZE:-8192}
+      - MAX_CONNECTIONS=${MAX_CONNECTIONS:-4096}
+      - MAX_CONN_PER_IP=${MAX_CONN_PER_IP:-100}
+      - LOGIN_MAX_ATTEMPTS=${LOGIN_MAX_ATTEMPTS:-10}
+      - LOGIN_WINDOW_SECONDS=${LOGIN_WINDOW_SECONDS:-60}
     ulimits:
       memlock: -1
       nofile:                             # EL BACKEND TAMBIÉN NECESITA ESTO
         soft: 65536
         hard: 65536
     security_opt:
-      - seccomp:unconfined
+      # Perfil propio (ver TODO.md y seccomp-cerver.json), no "unconfined".
+      # Base: el perfil DEFAULT de Docker (moby/profiles), que bloquea
+      # mount/reboot/carga de modulos/etc. — mas io_uring_setup/
+      # io_uring_enter/io_uring_register, ausentes del default (confirmado
+      # con grep antes de agregarlos). Sin esto, io_uring_queue_init
+      # fallaba y el proceso crasheaba con SIGSEGV (config/db.c no
+      # chequea ese codigo de retorno) — de ahi que este repo tuviera
+      # "unconfined" antes, que deshabilita TODA restriccion en vez de
+      # bloquear solo lo que el binario no necesita.
+      - seccomp:./seccomp-cerver.json
     volumes:
       - pg_socket:/var/run/postgresql
     depends_on:

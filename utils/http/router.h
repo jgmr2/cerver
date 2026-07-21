@@ -29,6 +29,20 @@
  *     invocar el handler; si falta o es invalido/vencido, dispatch()
  *     responde 401 y el handler ni se llama. El handler puede leer los
  *     claims del token con jwt_claim("sub")/jwt_claim("username").
+ *
+ *     ADVERTENCIA APARTE, MAS IMPORTANTE, PARA CUALQUIER RUTA CON
+ *     ":id" (o similar) QUE DEVUELVA UN RECURSO DE UN USUARIO (IDOR,
+ *     CWE-639): get_auth()/post_auth()/etc. solo verifican "¿hay un JWT
+ *     valido?", NUNCA "¿el dueño de ESTE recurso puntual es el mismo
+ *     que el dueño del JWT?". Nada en el router lo hace por vos. Un
+ *     handler tipo "GET /api/pedidos/:id" que solo chequea el JWT y
+ *     despues busca el pedido por :id sin comparar el owner deja que
+ *     cualquier usuario logueado lea el pedido de cualquier otro con
+ *     solo cambiar el numero en la URL. Antes de devolver un recurso
+ *     identificado por route_param(), comparar su dueño real (la
+ *     columna user_id/owner_id de la fila, no algo que venga del
+ *     cliente) contra jwt_claim("sub") — usar route_require_owner() de
+ *     mas abajo para no reimplementar esto en cada handler.
  */
 #ifndef ROUTER_H
 #define ROUTER_H
@@ -203,6 +217,56 @@ static inline const char *route_param(const char *name) {
         if (strcmp(route_params[i].name, name) == 0) return route_params[i].value;
     }
     return NULL;
+}
+
+/*
+ * route_require_owner - guardrail contra IDOR (CWE-639) para rutas que
+ * devuelven un recurso de un usuario puntual
+ *
+ * Compara el dueño REAL de un recurso (leido de la fila que ya se trajo
+ * de la base, nunca de algo que mande el cliente) contra el "sub" del
+ * JWT valido de este request. Pensado para llamarse DESPUES de traer la
+ * fila (adentro del callback de la consulta, ver cb en config/db.h) y
+ * ANTES de mandarsela al cliente — si no coincide, esta funcion ya
+ * responde 403 por su cuenta; el caller solo necesita devolver sin hacer
+ * nada mas.
+ *
+ * Solo tiene sentido en un handler registrado con get_auth()/post_auth()/
+ * etc. (dispatch() ya garantizo que hay un JWT valido antes de llegar
+ * aca, ver la advertencia de IDOR en el comentario de arriba de este
+ * archivo); si jwt_claim("sub") fuera NULL aca seria un bug de esta
+ * libreria, no del handler que la llama — de todos modos se trata como
+ * "no autorizado" en vez de asumir nada.
+ *
+ * Ejemplo (ver controllers/home.h, me_by_id, para el caso completo):
+ *   static int on_pedido_found(struct io_uring *r, int f, PGresult *res, void *ud) {
+ *       if (!res || PQntuples(res) < 1) { send_404(r, f); return 0; }
+ *       if (!route_require_owner(r, f, PQgetvalue(res, 0, COL_USER_ID))) return 0;
+ *       res_json(r, f, ...);
+ *       return 0;
+ *   }
+ *
+ * Parametros:
+ *   r        - anillo io_uring del hilo actual
+ *   fd       - file descriptor del cliente
+ *   owner_id - dueño real del recurso (columna de la fila ya traida de
+ *              la base, NUNCA route_param() ni ningun otro dato que
+ *              venga directo del cliente — eso volveria el chequeo
+ *              inutil, el atacante controlaria las dos puntas de la
+ *              comparacion)
+ *
+ * Retorna:
+ *   distinto de 0 si el dueño coincide y el handler puede seguir; 0 si
+ *   ya se mando 403 (el handler debe retornar de inmediato sin mandar
+ *   ninguna otra respuesta).
+ */
+static inline int route_require_owner(struct io_uring *r, int fd, const char *owner_id) {
+    const char *sub = jwt_claim("sub");
+    if (!sub || !owner_id || strcmp(sub, owner_id) != 0) {
+        send_res(r, fd, "403 Forbidden", "text/plain", "403");
+        return 0;
+    }
+    return 1;
 }
 
 /* Azucar sintactica sobre add_route() para cada metodo HTTP soportado;

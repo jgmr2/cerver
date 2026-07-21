@@ -21,6 +21,8 @@
  * header se incluye antes que router.h en el orden de compilacion. */
 void res_json(struct io_uring *r, int f, const char *json);
 const char *route_param(const char *name);
+int route_require_owner(struct io_uring *r, int fd, const char *owner_id);
+const char *jwt_claim(const char *name);
 
 /*
  * on_api - callback de la consulta QUERY_API_TIME (SELECT current_timestamp)
@@ -30,6 +32,13 @@ const char *route_param(const char *name);
  * primeros 4 bytes en hexadecimal (mas ilustrativo que util, pensado
  * como ejemplo de como leer un PGresult). Si la consulta fallo, responde
  * 503 en el body JSON.
+ *
+ * `QUERY_API_TIME` siempre devuelve un timestamp (mucho mas largo que 4
+ * bytes), asi que hoy 'len < 4' nunca pasa en la practica — pero el
+ * chequeo queda igual: este handler es la plantilla que se copia para
+ * leer cualquier PGresult, y sin el chequeo explicito, cambiar la query
+ * a algo que devuelva un valor corto (o NULL) leeria memoria fuera de
+ * los bytes reales del resultado.
  *
  * Parametros:
  *   r        - anillo io_uring del hilo actual
@@ -45,9 +54,14 @@ static int on_api(struct io_uring *r, int f, PGresult *res, void *userdata) {
     (void)userdata;
     if (res && PQresultStatus(res) == PGRES_TUPLES_OK) {
         unsigned char *v = (void*)PQgetvalue(res, 0, 0);
+        int len = PQgetlength(res, 0, 0);
         char j[128];
-        sprintf(j, "{\"bytes\":%d,\"hex\":\"%02x%02x%02x%02x\"}",
-                PQgetlength(res, 0, 0), v[0], v[1], v[2], v[3]);
+        if (len < 4) {
+            snprintf(j, sizeof(j), "{\"bytes\":%d,\"hex\":\"\"}", len);
+        } else {
+            snprintf(j, sizeof(j), "{\"bytes\":%d,\"hex\":\"%02x%02x%02x%02x\"}",
+                    len, v[0], v[1], v[2], v[3]);
+        }
         res_json(r, f, j);
     } else {
         res_json(r, f, "{\"e\":503}");
@@ -163,6 +177,36 @@ static inline void echo(struct io_uring *r, int f, const char *m, const char *b)
     char j[600];
     snprintf(j, sizeof(j), "{\"msg\":\"%s\"}", escaped);
     res_json(r, f, j);
+}
+
+/*
+ * me_by_id - handler de GET /api/me/:id (protegida)
+ *
+ * Ejemplo minimo y ejecutable de route_require_owner()
+ * (utils/http/router.h): el "recurso" es el propio perfil del usuario
+ * logueado, para no necesitar una tabla de negocio real en el
+ * boilerplate — pero el guardrail es el mismo que usaria un handler que
+ * sirve pedidos, facturas, o cualquier fila de otra tabla. Probar con el
+ * :id propio (200, mismo body que GET /api/me) y con el :id de otro
+ * usuario (403) es la forma de confirmar que el guardrail esta vivo.
+ *
+ * Un handler real que trae el recurso de Postgres primero, llama a
+ * route_require_owner() DESPUES de tener la fila, pasando la columna
+ * owner/user_id de esa fila (nunca route_param() directo como aca) —
+ * ver el ejemplo completo en el comentario de route_require_owner.
+ *
+ * Parametros:
+ *   r - anillo io_uring del hilo actual
+ *   f - file descriptor del cliente
+ *   m - metodo HTTP, sin uso
+ *   b - cuerpo del request, sin uso
+ */
+static inline void me_by_id(struct io_uring *r, int f, const char *m, const char *b) {
+    (void)m; (void)b;
+    if (!route_require_owner(r, f, route_param("id"))) return;
+    char body[192];
+    snprintf(body, sizeof(body), "{\"sub\":\"%s\",\"username\":\"%s\"}", jwt_claim("sub"), jwt_claim("username"));
+    res_json(r, f, body);
 }
 
 

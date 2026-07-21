@@ -20,6 +20,78 @@ PGconn *pg_connect(const char *conninfo, char *err, size_t err_len) {
     return conn;
 }
 
+int pg_list_databases(PGconn *conn, char out_names[][MAX_NAME_LEN], int max_dbs, char *err, size_t err_len) {
+    const char *sql = "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;";
+
+    PGresult *res = PQexec(conn, sql);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        snprintf(err, err_len, "%s", PQerrorMessage(conn));
+        PQclear(res);
+        return -1;
+    }
+
+    int n = PQntuples(res);
+    int count = n < max_dbs ? n : max_dbs;
+    for (int i = 0; i < count; i++) {
+        snprintf(out_names[i], MAX_NAME_LEN, "%s", PQgetvalue(res, i, 0));
+    }
+    PQclear(res);
+    return count;
+}
+
+/* append_conninfo_field - agrega " key='valor-escapado'" a out (formato
+   keyword=value de libpq). Escapa backslash y comilla simple con un
+   backslash adelante, como exige ese formato para cualquier valor entre
+   comillas simples - imprescindible aca porque el password del usuario
+   puede traer cualquier caracter. */
+static void append_conninfo_field(char *out, size_t out_size, const char *key, const char *value) {
+    size_t pos = strlen(out);
+    int n = snprintf(out + pos, pos < out_size ? out_size - pos : 0, "%s%s='", pos ? " " : "", key);
+    if (n > 0) pos += (size_t)n;
+
+    for (const char *p = value; *p && pos + 2 < out_size; p++) {
+        if (*p == '\\' || *p == '\'') out[pos++] = '\\';
+        if (pos + 1 < out_size) out[pos++] = *p;
+    }
+    if (pos + 1 < out_size) out[pos++] = '\'';
+    out[pos < out_size ? pos : out_size - 1] = '\0';
+}
+
+int pg_conninfo_with_dbname(const char *conninfo, const char *new_dbname, char *out, size_t out_size, char *err, size_t err_len) {
+    const char *conn_str = conninfo && *conninfo ? conninfo : getenv("DATABASE_URL");
+    if (!conn_str || !*conn_str) {
+        snprintf(err, err_len, "falta la cadena de conexion: pasa --database-url o define DATABASE_URL");
+        return -1;
+    }
+
+    char *errmsg = NULL;
+    PQconninfoOption *opts = PQconninfoParse(conn_str, &errmsg);
+    if (!opts) {
+        snprintf(err, err_len, "%s", errmsg ? errmsg : "cadena de conexion invalida");
+        if (errmsg) PQfreemem(errmsg);
+        return -1;
+    }
+
+    const char *host = NULL, *port = NULL, *user = NULL, *password = NULL;
+    for (PQconninfoOption *o = opts; o->keyword; o++) {
+        if (!o->val) continue;
+        if (strcmp(o->keyword, "host") == 0) host = o->val;
+        else if (strcmp(o->keyword, "port") == 0) port = o->val;
+        else if (strcmp(o->keyword, "user") == 0) user = o->val;
+        else if (strcmp(o->keyword, "password") == 0) password = o->val;
+    }
+
+    out[0] = '\0';
+    append_conninfo_field(out, out_size, "host", host ? host : "localhost");
+    append_conninfo_field(out, out_size, "port", port ? port : "5432");
+    if (user) append_conninfo_field(out, out_size, "user", user);
+    if (password) append_conninfo_field(out, out_size, "password", password);
+    append_conninfo_field(out, out_size, "dbname", new_dbname);
+
+    PQconninfoFree(opts);
+    return 0;
+}
+
 int pg_list_tables(PGconn *conn, char out_names[][MAX_NAME_LEN], int max_tables, char *err, size_t err_len) {
     const char *sql =
         "SELECT table_name FROM information_schema.tables "

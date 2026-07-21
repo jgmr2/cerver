@@ -38,6 +38,11 @@ static inline void init_routes() {
      * handler. Plantilla para cualquier endpoint que necesite saber
      * quien es el usuario autenticado. */
     get_auth("/api/me", me);
+    /* Ejemplo del guardrail contra IDOR (route_require_owner, ver
+     * utils/http/router.h y controllers/home.h): 200 solo si :id
+     * coincide con el "sub" del JWT que mandaste, 403 si es el id de
+     * otro usuario. */
+    get_auth("/api/me/:id", me_by_id);
 
     /* Punto de insercion de tools/dbfiller: cada tabla generada agrega
      * aca su propio bloque get()/post_auth()/put_auth()/del_auth() (ver

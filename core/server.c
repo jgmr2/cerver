@@ -40,6 +40,7 @@
 #include "server.h"
 #include "../utils/events.h"
 #include "../utils/http/picohttpparser.h"
+#include "../utils/net/conn_limit.h"
 #include "../config/db.h"
 #include "../routes/index.h"
 
@@ -206,6 +207,15 @@ void *worker_loop(void *arg) {
                          * que se pidio el apagado y que dejamos de aceptar:
                          * se cierra sin procesar en vez de dejarla a medias. */
                         close(cfd);
+                    } else if (!conn_limit_try_accept(cfd, actx->client_addr.sin_addr.s_addr)) {
+                        /* Tope global o por IP superado (MAX_CONNECTIONS /
+                         * MAX_CONN_PER_IP, ver utils/net/conn_limit.h): se
+                         * cierra de una, sin mandar ni siquiera un 429, para
+                         * no gastar mas ciclos en una conexion que ya
+                         * decidimos no atender — eso es exactamente lo que un
+                         * ataque de agotamiento de conexiones (CWE-770) busca
+                         * que hagas. */
+                        close(cfd);
                     } else {
                         /* Mismo patron que _rearm_read: el primer read tras el accept
                          * tambien necesita timeout. Sin esto, un cliente que abre la
@@ -300,10 +310,13 @@ void *worker_loop(void *arg) {
                     } else {
                         /* Parseo invalido o incompleto: no reintentamos, se
                          * cierra la conexion directamente. */
+                        conn_limit_release(rd->client_fd);
                         close(rd->client_fd);
                     }
                 } else {
-                    /* read <= 0: EOF o error de socket. */
+                    /* read <= 0: EOF o error de socket (incluye el link_timeout
+                     * de slowloris cancelando el read, ver _rearm_read). */
+                    conn_limit_release(rd->client_fd);
                     close(rd->client_fd);
                 }
                 free(rd);

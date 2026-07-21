@@ -37,6 +37,7 @@
 #include <postgresql/libpq-fe.h>
 #include "../events.h"
 #include "../json.h"
+#include "../net/conn_limit.h"
 
 /* Tamano del buffer de lectura inicial de cada conexion (ver
  * initial_read_ctx_t en utils/events.h y su uso en core/server.c). */
@@ -224,6 +225,7 @@ static inline void _rearm_read(struct io_uring *ring, int fd) {
  *   fd   - file descriptor a cerrar
  */
 static inline void _close_conn(struct io_uring *ring, int fd) {
+    conn_limit_release(fd);
     struct io_uring_sqe *sqe = _get_sqe(ring);
     io_uring_prep_close(sqe, fd);
     io_uring_sqe_set_data(sqe, NULL);
@@ -468,6 +470,7 @@ static inline void http_helper_handle_cqe(struct io_uring_cqe *cqe) {
         }
         if (r->type != OP_CLOSE && r->file_fd > 0) close(r->file_fd);
         if (r->type != OP_CLOSE) {
+            conn_limit_release(r->client_fd);
             r->type = OP_CLOSE; sqe = _get_sqe(ring);
             io_uring_prep_close(sqe, r->client_fd);
             io_uring_sqe_set_data(sqe, r); io_uring_submit(ring);

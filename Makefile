@@ -1,7 +1,16 @@
 # Configuración de Compilador
+# Flags de hardening (ver TODO.md — probadas contra el build real en
+# Alpine/musl, no asumidas):
+#   -fstack-protector-strong   canarios de pila en funciones con arrays/
+#                              structs locales expuestos a direccion tomada
+#   -D_FORTIFY_SOURCE=2        chequeo de tamano en funciones de string/mem
+#                              de la libc (memcpy, snprintf, etc) cuando el
+#                              tamano del buffer es conocido en compilacion;
+#                              requiere -O1+ (ya hay -O3)
+#   -Wl,-z,relro,-z,now        relocaciones de solo lectura tras el arranque
 CC       := gcc
-CFLAGS   := -O3 -Wall -Wextra -D_GNU_SOURCE -static
-LDFLAGS  := -static -L/usr/lib -L/lib
+CFLAGS   := -O3 -Wall -Wextra -D_GNU_SOURCE -static -fstack-protector-strong -D_FORTIFY_SOURCE=2
+LDFLAGS  := -static -Wl,-z,relro,-z,now -L/usr/lib -L/lib
 
 # Directorios
 BUILD_DIR := build
