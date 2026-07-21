@@ -63,7 +63,7 @@ static const char *SENSITIVE_COLUMN_NEEDLES[] = {
 };
 #define SENSITIVE_COLUMN_NEEDLE_COUNT (int)(sizeof(SENSITIVE_COLUMN_NEEDLES) / sizeof(SENSITIVE_COLUMN_NEEDLES[0]))
 
-static int is_sensitive_column(const char *name) {
+int is_sensitive_column(const char *name) {
     char lower[MAX_NAME_LEN];
     size_t i = 0;
     for (; name[i] && i + 1 < sizeof(lower); i++) lower[i] = (char)tolower((unsigned char)name[i]);

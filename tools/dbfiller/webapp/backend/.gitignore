@@ -2,7 +2,6 @@
 build/
 app
 *.o
-tests/unit/test_pure_functions
 
 # IDE
 .vscode/

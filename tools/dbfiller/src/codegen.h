@@ -11,6 +11,17 @@
 #define DBFILLER_GENERATED_MARKER "/* Generado por dbfiller -- ver tools/dbfiller. No editar a mano si vas a re-generar. */"
 
 /*
+ * is_sensitive_column - heuristica sobre el NOMBRE de una columna
+ * (password/hash/secret/token/api_key/apikey/credential, sin importar
+ * mayusculas), agnostica a que tabla sea. Usada por codegen.c para
+ * excluir columnas asi de list/get/create/update (ver el comentario
+ * junto a su definicion en codegen.c), y por seed.c para saber que
+ * columnas NO deben recibir un valor al azar sino SEED_PASSWORD_HASH
+ * (ver seed.h). Heuristica, no garantia.
+ */
+int is_sensitive_column(const char *name);
+
+/*
  * codegen_write_table - genera y escribe los 4 archivos de 'table' bajo
  * repo_root (controllers/<t>.c/.h, models/<t>.c/.h).
  *
