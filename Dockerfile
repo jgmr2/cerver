@@ -27,20 +27,49 @@ COPY --from=pg-static-deps /opt/pgsql/lib/libpgport.a /usr/lib/libpgport.a
 COPY --from=pg-static-deps /opt/pgsql/include/ /usr/include/
 
 WORKDIR /app
-COPY . . 
-RUN make
+COPY . .
+# El codigo que se compila vive en src/ (el "boilerplate" que se replica
+# en cada proyecto nuevo, ver README.md) -- tools/dbfiller/generate.py
+# (corrido a mano, resultado commiteado -- ver su README) es lo que llena
+# src/controllers/ y src/models/ con endpoints CRUD antes de este build,
+# no una etapa de Docker: asi el codigo generado se puede editar a mano
+# para agregar logica de negocio sin que un build futuro lo pise.
+RUN make -C src
 
 RUN echo "appuser:x:1000:1000:appuser:/home/appuser:/sbin/nologin" > /etc/passwd_app
 
-## ETAPA 2: IMAGEN FINAL
-# public/ es contenido estatico plano (HTML/CSS servido directo por static.h,
-# ver mount_static en routes/index.h), no el resultado de un build de Svelte:
-# se copia tal cual desde el repo, sin ninguna etapa de compilacion de
-# frontend previa.
+## ETAPA 2: IMAGEN DE PRODUCCION (sin Swagger UI)
+# Identica a "runtime" (mas abajo) salvo que no copia docs-ui/:
+# mount_static("/docs", ...) (routes/index.h) sigue registrado en el
+# binario (mismo binario que "runtime", ver etapa "build"), pero como la
+# carpeta no existe en esta imagen, /docs devuelve 404 solo -- no hace
+# falta ninguna flag de compilacion ni codigo condicional (ver TODO.md,
+# "Tamaño de imagen"). Construir esta imagen explicito con:
+#   docker build --target runtime-prod -t cerver:prod .
+# NO es la etapa default a proposito -- tiene que ir ANTES de "runtime"
+# en este archivo, porque `docker build .` sin --target siempre usa la
+# ULTIMA etapa del Dockerfile, y la que tiene que seguir siendo default
+# es "runtime" (con Swagger), para no romper el flujo de desarrollo
+# actual con un cambio silencioso de comportamiento.
+FROM scratch AS runtime-prod
+COPY --from=build /etc/passwd_app /etc/passwd
+COPY --from=build /app/src/app /bin/app
+
+ENV PORT=8080
+EXPOSE 8080
+USER appuser
+ENTRYPOINT ["./bin/app"]
+
+## ETAPA 3: IMAGEN FINAL (dev/default -- incluye Swagger UI en /docs)
+# Sin frontend de ejemplo: este boilerplate no monta nada en "/" (ver
+# routes/index.h) -- si un proyecto agrega uno, agrega aca tambien su
+# propio COPY --from=build /app/public /public. ULTIMA etapa del
+# archivo a proposito (ver comentario de "runtime-prod" arriba): es la
+# que se construye con `docker build .`/`docker compose build` sin
+# --target.
 FROM scratch AS runtime
 COPY --from=build /etc/passwd_app /etc/passwd
-COPY --from=build /app/app /bin/app
-COPY --from=build /app/public /public
+COPY --from=build /app/src/app /bin/app
 COPY --from=build /app/docs-ui /docs-ui
 
 # El binario lee PORT al arrancar (ver g_port en core/server.h); si no

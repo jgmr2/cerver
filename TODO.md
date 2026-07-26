@@ -6,6 +6,38 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
 
 ## 🔴 Pendientes críticos
 
+- [ ] **404 falso bajo pool de DB agotado, en cualquier endpoint CON
+      parámetros** (get/create/update/delete generados por
+      `tools/dbfiller`, y login/registro). Encontrado con `ab` contra
+      `GET /api/item/1` (fila que existe siempre): 0% de fallos a
+      concurrencia 2, ~2% a concurrencia 10, **22% (1112/5000) a
+      concurrencia 100** — todos 404 reales (confirmado en logs de
+      nginx, no es un artefacto del cliente de carga). `GET /api/item`
+      (list, sin parámetros) aguanta la misma concurrencia con 0
+      fallos. `POST /api/auth/login` (con credenciales válidas) también
+      lo sufre: 10% de fallos a concurrencia 30.
+      **Causa raíz** (`src/config/db.h:229-260`,
+      `db_query_prepared_params_async`): a diferencia de la variante
+      sin parámetros (`db_query_prepared_async`, que sí encola), esta
+      **no encola** si el pool de conexiones a Postgres está agotado —
+      llama al callback con `res=NULL` de inmediato, y el handler
+      generado lo trata como "no existe" (404). El comentario original
+      asumía que solo la usaba login/registro ("no es el camino
+      caliente"), pero `tools/dbfiller` genera get/create/update/delete
+      de **cualquier** tabla con esta misma variante — el trade-off ya
+      no aplica solo a auth.
+      Con `DB_POOL_SIZE` bajo (2 en desarrollo, 4 en producción) × N
+      hilos, cualquier concurrencia que supere ese total en una tabla
+      concurrida puede devolver 404 falsos para filas que sí existen (o
+      fallar silenciosamente un create/update/delete legítimo).
+      Sin resolver todavía — dos caminos evaluados sin implementar:
+      (a) extender la cola genérica (`pending_q`, `config/db.c`) para
+      soportar arreglos de parámetros dinámicos, igual que ya hace la
+      variante sin parámetros; (b) al menos devolver `503`/`429` en vez
+      de `404` cuando el pool está agotado, para no mentirle al cliente
+      sobre si el recurso existe (no elimina los fallos bajo carga
+      extrema, pero corrige la semántica).
+
 - [x] ~~**Rotar credenciales de desarrollo local** — `POSTGRES_PASSWORD`
   (era `12345`) y `JWT_SECRET` regenerados (`openssl rand`), aplicados al
   `.env` y a la Postgres ya corriendo (`ALTER USER`, no solo el archivo).
@@ -47,16 +79,6 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
   Regresión final, simulando un checkout de CI genuinamente limpio (clon
   aparte, sin `.env`, sin volúmenes previos): 23/23 tests de integración
   ok, `RestartCount=0`.~~
-- [ ] **`X-Forwarded-For` en `conn_limit`/`login_limit`, para cuando se
-      configure nginx.** Decisión de esta sesión: no vale la pena arreglar
-      `userland-proxy` de Docker a nivel de host, porque con nginx delante
-      cerver va a ver la IP de nginx igual, no la del cliente real — el
-      problema se reintroduce un nivel más arriba. El fix real es leer
-      `X-Forwarded-For`/`X-Real-IP` en `conn_limit_get_ip()` en vez de la IP
-      del socket — **solo si nginx es la única vía de entrada** (si el puerto
-      de cerver sigue expuesto en paralelo, cualquiera puede falsear ese
-      header y saltarse `MAX_CONN_PER_IP`/`LOGIN_MAX_ATTEMPTS`). No
-      implementado todavía porque nginx no existe aún en el repo.
 - [ ] **Logging estructurado.** Sigue siendo `printf`/`fprintf(stderr, ...)`
       suelto. Sin esto, si cualquiera de los mecanismos de esta sesión se
       dispara en producción (rate limit de login, rechazo de conexión,
@@ -82,12 +104,12 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
 - [x] ~~Grep de secrets hardcodeados fuera de `.env`: ninguno encontrado
   (foto de hoy, no hay gate automático que lo garantice a futuro).~~
 - [x] ~~**Límite de conexiones concurrentes, global y por IP** (CWE-770) —
-  `utils/net/conn_limit.h`/`.c`, `MAX_CONNECTIONS`/`MAX_CONN_PER_IP`.
+  `src/utils/net/conn_limit.h`/`.c`, `MAX_CONNECTIONS`/`MAX_CONN_PER_IP`.
   Contadores atómicos globales sin locks, buckets hasheados por IP.
   Probado con carga real (`ab`, hasta 26k req/s) y aislamiento entre IPs
   reales distintas — 0 falsos rechazos, límite exacto respetado.~~
 - [x] ~~**Rate-limiting de login fallido por IP** (fuerza bruta /
-  credential stuffing) — `utils/auth/login_limit.h`/`.c`,
+  credential stuffing) — `src/utils/auth/login_limit.h`/`.c`,
   `LOGIN_MAX_ATTEMPTS`/`LOGIN_WINDOW_SECONDS`. Rechaza con `429` antes de
   tocar la DB o calcular PBKDF2. De paso, `explicit_bzero` sobre passwords
   en texto plano en memoria (`login_ctx_t`/`register_user`).~~
@@ -101,9 +123,9 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
   del toolchain de Alpine/musl. Verificado sobre el binario real
   (disassembly, `readelf`), no asumido.~~
 - [x] ~~`sprintf` suelto + lectura sin validar `PQgetlength` en
-  `controllers/home.h` — corregido a `snprintf` + guard `len < 4`.~~
+  `src/controllers/home.h` — corregido a `snprintf` + guard `len < 4`.~~
 - [x] ~~**Guardrail contra IDOR** (CWE-639) — `route_require_owner()`
-  (`utils/http/router.h`) + endpoint de ejemplo `GET /api/me/:id`. Probado
+  (`src/utils/http/router.h`) + endpoint de ejemplo `GET /api/me/:id`. Probado
   con dos usuarios reales: propio id → `200`, id ajeno → `403`.~~
 - [x] ~~**Perfil de seccomp propio** (`seccomp-cerver.json`), reemplaza
   `seccomp:unconfined` — default de Docker (`moby/profiles`) + los tres
@@ -114,12 +136,29 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
   como syscall propio del proceso) — mismo motivo por el que `io_uring`
   genera desconfianza en seguridad en general.~~
 - [x] ~~**Decisión sobre `userland-proxy` de Docker**: no se arregla a
-  nivel de host. Con nginx planeado delante, el problema se reintroduce
-  ahí igual — ver pendiente de `X-Forwarded-For` arriba.~~
+  nivel de host. Con nginx delante, el problema se reintroduce ahí
+  igual — resuelto donde corresponde, ver `X-Forwarded-For` mas abajo.~~
+- [x] ~~**`X-Forwarded-For`/`X-Real-IP` en `login_limit`, con nginx ya
+  delante** — `extract_forwarded_ip()` (`src/utils/http/router.h`),
+  usada por `login_user` (generado por `tools/dbfiller`) solo si
+  `TRUST_PROXY_HEADERS=1` (nuevo tunable, `src/main.c`). Probado real:
+  10 intentos fallidos con `X-Forwarded-For: 9.9.9.9` → `429` en el
+  intento 11; la misma cuenta con `X-Forwarded-For: 8.8.8.8` sigue
+  dando `401` (no comparten contador). Solo seguro porque el backend ya
+  no tiene puerto propio expuesto (ver `docker-compose.yml`, servicio
+  `nginx`) — si se vuelve a exponer, hay que bajar `TRUST_PROXY_HEADERS`
+  a `0`.
+  Límite **no** resuelto (y no es arreglable en código): `conn_limit`
+  (conexiones concurrentes por IP, `MAX_CONN_PER_IP`) actúa al aceptar
+  la conexión TCP, antes de que existan headers HTTP que leer — con
+  nginx delante, ese tope pasa a ser un tope global disfrazado. Se subió
+  el default a `4096` (cerca de `MAX_CONNECTIONS`) para no
+  autolimitarse; un límite real por cliente detrás de un proxy se
+  configura en nginx (`limit_conn`/`limit_req`), no en cerver.~~
 
 **Confiabilidad**
 - [x] ~~**Reconexión automática a Postgres** si la DB se cae y vuelve —
-  `reconnect_if_dead()` (`config/db.c`). Probado con `docker compose
+  `reconnect_if_dead()` (`src/config/db.c`). Probado con `docker compose
   restart db` bajo carga: el pool se recupera solo, cero intervención
   manual.~~
 - [x] ~~**Reinicio automático de proceso ante un crash real** —
@@ -134,7 +173,7 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
 
 **Router / auth / observabilidad**
 - [x] ~~Parámetros de path (`/recursos/:id`), estilo Express —
-  `path_matches()` en `utils/http/router.h`.~~
+  `path_matches()` en `src/utils/http/router.h`.~~
 - [x] ~~Puerto configurable vía `PORT` (antes hardcodeado a 8080).~~
 - [x] ~~Métodos `post`/`put`/`patch`/`del` verificados — de paso, arreglado
   un bug real de truncado silencioso de bodies grandes (ahora `413`
@@ -159,18 +198,35 @@ completo de qué se probó y cómo sigue en el historial de git de este archivo.
 **Proceso / documentación**
 - [x] ~~`README.md` reescrito corto, repo limpiado (`build/` borrado,
   Sakila removido del boilerplate, `tools/dbfiller` generaliza).~~
+- [x] ~~**nginx delante** (`nginx/Dockerfile`, `nginx/nginx.conf`) —
+  sirve el build de `frontend/` (placeholder Vite+Svelte) como SPA
+  (`try_files ... /index.html`) y reverse-proxea `/api`, `/healthz`,
+  `/docs` al backend. Los estáticos los sirve nginx directo, no el
+  backend (que sigue sin `public/`, sin mount en `/`). Probado:
+  `docker compose up` con volumen fresco, `/`, `/api`, `/healthz`,
+  `/docs` responden vía nginx (puerto 80), y el puerto 8080 del backend
+  ya no es alcanzable desde el host.~~
 
 ## Backlog (no bloqueante)
 
 - [ ] Métricas mínimas (requests/s, latencia, pool de DB en uso) — depende de
       a dónde se van a mandar (Prometheus, CloudWatch, algo propio).
-- [ ] `INITIAL_READ_BUF_SIZE` (`utils/http/http.h`, hoy 4096) a variable de
+- [ ] `INITIAL_READ_BUF_SIZE` (`src/utils/http/http.h`, hoy 4096) a variable de
       entorno — atado a la validación de `Content-Length`, requiere retestear
       ese caso puntual si se toca.
 - [ ] Métrica de éxito del fallback SPA vs 404 reales, para detectar rutas de
       frontend rotas.
-- [ ] HTTPS/TLS in-app: decidido dejarlo afuera, asumido detrás de nginx.
-- [ ] Tamaño de imagen (245KB → 2.56MB tras auth + `/docs`): evaluado y
-      aceptado por ahora. Opciones si algún día importa: target `dev`/`prod`
-      separados en el `Dockerfile`, o reemplazar Swagger UI por un renderer
-      de solo lectura.
+- [ ] HTTPS/TLS in-app: decidido dejarlo afuera, asumido detrás de nginx
+      (que ya existe en el repo, ver `nginx/` — terminar de configurar TLS
+      ahí, con Let's Encrypt/certificado propio, queda pendiente).
+- [x] ~~Tamaño de imagen (245KB → 2.56MB tras auth + `/docs`): resuelto con
+  un target `runtime-prod` en el `Dockerfile` (sin `docs-ui/`) —
+  `docker build --target runtime-prod`. `runtime` (con Swagger) sigue
+  siendo el default para no romper el flujo de desarrollo.~~
+- [ ] `resolver` dinámico de nginx (`nginx/nginx.conf` usa
+      `proxy_pass http://backend:8080` con hostname literal, resuelto una
+      sola vez al arrancar nginx): si el backend se reinicia solo (crash
+      loop) sin que nginx se reinicie también, nginx puede quedar con una
+      IP vieja cacheada. Mitigable con `resolver 127.0.0.11 valid=10s;` +
+      `proxy_pass` con variable — no implementado, caso borde poco
+      probable en este tamaño de despliegue.

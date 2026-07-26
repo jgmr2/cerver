@@ -3,6 +3,12 @@ build/
 app
 *.o
 tests/unit/test_pure_functions
+__pycache__/
+*.pyc
+
+# frontend/ (ver nginx/Dockerfile, que lo construye dentro de Docker)
+frontend/node_modules/
+frontend/dist/
 
 # IDE
 .vscode/

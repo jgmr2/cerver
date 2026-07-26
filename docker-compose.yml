@@ -44,8 +44,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
+      # "runtime" (default, con Swagger en /docs) o "runtime-prod" (sin
+      # Swagger, ver Dockerfile) -- BACKEND_TARGET=runtime-prod docker
+      # compose up -d --build, o definirlo en .env.
+      target: ${BACKEND_TARGET:-runtime}
+    # Sin mapeo de puerto al host a propósito: nginx (ver servicio
+    # "nginx" mas abajo) pasa a ser la UNICA via de entrada. Es lo que
+    # hace seguro confiar en TRUST_PROXY_HEADERS de aca abajo -- si este
+    # puerto se vuelve a exponer, cualquiera podria mandar un
+    # X-Forwarded-For falso y saltarse LOGIN_MAX_ATTEMPTS (ver
+    # utils/http/router.h, extract_forwarded_ip). Para debug directo sin
+    # pasar por nginx: exponer un puerto temporal aca Y bajar
+    # TRUST_PROXY_HEADERS a 0 mientras tanto.
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@/${POSTGRES_DB}?host=/var/run/postgresql
       - JWT_SECRET=${JWT_SECRET}
@@ -62,9 +72,23 @@ services:
       - DB_POOL_SIZE=${DB_POOL_SIZE:-4} # antes 16: x N hilos (1 por vCPU) da el total de conexiones a Postgres, ver max_connections arriba
       - DB_PENDING_QUEUE_SIZE=${DB_PENDING_QUEUE_SIZE:-8192}
       - MAX_CONNECTIONS=${MAX_CONNECTIONS:-4096}
-      - MAX_CONN_PER_IP=${MAX_CONN_PER_IP:-100}
+      # Con nginx como unica via de entrada, TODAS las conexiones le
+      # llegan al backend con la IP de nginx (conn_limit_try_accept
+      # actua al aceptar la conexion TCP, antes de que exista ningun
+      # header HTTP que decir otra cosa -- ver utils/net/conn_limit.h).
+      # Un tope bajo por IP se convertiria en un tope global disfrazado
+      # bastante mas chico que MAX_CONNECTIONS: se sube cerca de ese
+      # valor aca: el limite real por cliente real, detras de un proxy,
+      # se configura en nginx (limit_conn/limit_req), no aca.
+      - MAX_CONN_PER_IP=${MAX_CONN_PER_IP:-4096}
       - LOGIN_MAX_ATTEMPTS=${LOGIN_MAX_ATTEMPTS:-10}
       - LOGIN_WINDOW_SECONDS=${LOGIN_WINDOW_SECONDS:-60}
+      # Habilita que utils/auth/auth.c (generado por tools/dbfiller) use
+      # X-Forwarded-For/X-Real-IP en vez de la IP del socket para el
+      # rate-limit de login (ver utils/http/router.h,
+      # extract_forwarded_ip) -- solo seguro porque este servicio ya no
+      # tiene un puerto propio expuesto al host (ver comentario arriba).
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-1}
     ulimits:
       memlock: -1
       nofile:                             # EL BACKEND TAMBIÉN NECESITA ESTO
@@ -86,6 +110,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
     restart: unless-stopped
 
 volumes:

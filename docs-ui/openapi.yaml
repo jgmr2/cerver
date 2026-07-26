@@ -14,10 +14,14 @@ servers:
 tags:
   - name: infra
     description: Health checks, sin lógica de negocio
-  - name: sakila
-    description: Endpoints de ejemplo sobre el dataset Sakila
   - name: auth
-    description: Registro, login y verificación de identidad (JWT HS256)
+    description: >
+      Registro, login y verificación de identidad (JWT HS256). Generado por
+      tools/dbfiller a partir de la tabla del esquema que sirva para login
+      (ver tools/dbfiller/README.md, sección "Autenticación") — el campo
+      "username" del body es un nombre fijo del framework, no depende del
+      esquema: puede representar un email u otro identificador único, según
+      cuál columna se haya detectado.
   - name: ejemplos
     description: Endpoints de plantilla/demostración del boilerplate
 
@@ -36,6 +40,10 @@ components:
       properties:
         error:
           type: string
+    # Punto de insercion de tools/dbfiller: cada tabla generada agrega
+    # aca sus propios schemas <Tabla>/<Tabla>Create/<Tabla>Update (ver
+    # tools/dbfiller/generate.py). No borrar este comentario.
+    # dbfiller:schemas-point
 
 paths:
   /healthz:
@@ -103,58 +111,18 @@ paths:
         "404":
           description: Segmento vacío o con más segmentos de los esperados
 
-  /api/sakila/films/top:
-    get:
-      tags: [sakila]
-      summary: Top 10 películas por duración
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        title: { type: string }
-                        length: { type: integer }
-                        release_year: { type: integer }
-                        rating: { type: string }
-
-  /api/sakila/actors/top:
-    get:
-      tags: [sakila]
-      summary: Top 10 actores por cantidad de películas
-      description: >
-        Servido desde un cache en memoria por hilo, refrescado cada 30s
-        (ver sakila_refresh_actors_cache) — no golpea Postgres en cada
-        request. La consulta original (JOIN + GROUP BY) era el cuello de
-        botella real del servidor bajo carga antes del cache.
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        first_name: { type: string }
-                        last_name: { type: string }
-                        films: { type: integer }
-
   /api/auth/register:
     post:
       tags: [auth]
       summary: Crea un usuario nuevo y devuelve un JWT (auto-login)
+      description: >
+        El body acepta "username" (el identificador de login que haya
+        detectado dbfiller — puede ser un email) y "password", más
+        cualquier otra columna que la tabla de auth exija (ver el
+        comentario al inicio de utils/auth/auth.c generado, o
+        tools/dbfiller/README.md). Esas columnas extra no están fijas: si
+        el esquema cambia, correr dbfiller de nuevo actualiza este
+        endpoint.
       requestBody:
         required: true
         content:
@@ -165,7 +133,7 @@ paths:
               properties:
                 username:
                   type: string
-                  description: 3-32 caracteres, alfanumérico + "_"/"-"
+                  description: identificador de login (según el esquema, puede ser un email)
                 password:
                   type: string
                   description: mínimo 8 caracteres
@@ -180,9 +148,9 @@ paths:
                 properties:
                   token: { type: string }
         "400":
-          description: Body inválido, username/password no cumplen el formato
+          description: Body inválido, faltan columnas requeridas o no cumplen el formato
         "409":
-          description: El username ya existe
+          description: El identificador de login ya existe
 
   /api/auth/login:
     post:
@@ -233,3 +201,8 @@ paths:
                   username: { type: string }
         "401":
           description: Token faltante, inválido o vencido
+
+  # Punto de insercion de tools/dbfiller: cada tabla generada agrega aca
+  # sus propios paths /api/<tabla> y /api/<tabla>/{id} (ver
+  # tools/dbfiller/generate.py). No borrar este comentario.
+  # dbfiller:paths-point

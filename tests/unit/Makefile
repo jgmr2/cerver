@@ -5,7 +5,7 @@
 # liburing.h y openssl aunque este test no llame a nada de auth/red -
 # son headers, no eligen que se linkee, asi que hace falta lo mismo que
 # el binario real para compilar limpio.
-ROOT := ../..
+ROOT := ../../src
 CC := gcc
 CFLAGS := -Wall -Wextra -D_GNU_SOURCE \
   -I$(ROOT) -I$(ROOT)/config -I$(ROOT)/controllers -I$(ROOT)/core \
