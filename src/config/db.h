@@ -229,15 +229,18 @@ void db_query_prepared_fmt_async(struct io_uring *r, int f, const char *stmt, in
  * db_query_prepared_params_async - lanza un prepared statement con
  * parametros reales (formato texto)
  *
- * A diferencia de db_query_prepared_async, esta variante no encola la
- * peticion si el pool esta agotado: la cola generica (pending_q, ver
- * db.c) no tiene forma de conservar un arreglo de parametros dinamicos
- * entre llamadas sin volver mas compleja esa estructura. Bajo pool
- * agotado se invoca el callback con res=NULL de inmediato, igual que si
- * la consulta hubiera fallado. Aceptable en la practica: pensada para
- * login/registro (utils/auth/auth.c), que no son el camino caliente de
- * este servidor a diferencia de las rutas de lectura de alto trafico
- * (p.ej. los "list"/"get" que genera tools/dbfiller para cada tabla).
+ * Igual que db_query_prepared_async: si no hay conexiones libres, la
+ * peticion se encola (pending_q, ver config/db.c) y se atiende en
+ * cuanto se libere alguna; si la cola tambien esta llena, se invoca el
+ * callback con res=NULL de inmediato. A diferencia de la variante sin
+ * parametros, encolar esta si tiene un costo extra: los valores de
+ * paramValues normalmente vienen de buffers de corta vida (el stack del
+ * handler que llamo, o route_params[] -- __thread y reciclado en el
+ * PROXIMO request de este mismo hilo), asi que la cola guarda una copia
+ * propia (strdup) de cada uno, liberada apenas se desencola la
+ * peticion. Si copiar esos parametros falla (sin memoria) o supera el
+ * tope defensivo de parametros por peticion (32, ver PENDING_MAX_PARAMS
+ * en config/db.c), se trata igual que cola llena.
  *
  * Los valores se mandan como texto plano (formato 0 de libpq); Postgres
  * los castea segun el tipo de columna de la posicion $N correspondiente

@@ -1,0 +1,78 @@
+# nginx/nginx-tls.conf.template - variante HTTPS de nginx.conf, lista
+# para activar cuando un cliente puntual ya tenga su dominio propio
+# apuntando a esta instancia (ver nginx/TLS.md para el paso a paso
+# completo). NO se usa por default -- nginx/Dockerfile sigue copiando
+# nginx.conf (HTTP simple) salvo que se construya explicitamente
+# apuntando a este archivo.
+#
+# Mismos locations que nginx.conf (proxy a /api, /healthz, /docs +
+# estaticos del frontend), solo que:
+#   - :80 ya no sirve la app: solo el desafio ACME y un redirect a :443.
+#   - :443 sirve todo lo que antes servia :80, con TLS.
+#
+# ${DOMAIN} se reemplaza por el dominio real del cliente (nginx no
+# soporta variables de entorno en su config directamente -- se resuelve
+# a mano con `envsubst` o `sed` al activar este archivo, ver TLS.md).
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    # Necesario para renovar el certificado (certbot vuelve a pedir este
+    # desafio via HTTP cada vez que renueva, aunque el sitio ya hable
+    # HTTPS) -- ver certbot_www en docker-compose.yml.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # Cualquier otra cosa en :80 redirige a :443 -- HTTP plano no sirve
+    # la app en esta variante.
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    # Mismos locations que nginx.conf -- ver ese archivo para los
+    # comentarios completos de cada uno, no repetidos aca.
+    location /api {
+        proxy_pass http://backend:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /healthz {
+        proxy_pass http://backend:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /docs {
+        proxy_pass http://backend:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /assets/ {
+        root /usr/share/nginx/html;
+        try_files $uri =404;
+    }
+
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+}

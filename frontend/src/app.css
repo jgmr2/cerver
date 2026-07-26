@@ -1,0 +1,140 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #f7f7f8;
+  color: #1a1a1a;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.5rem;
+  background: #1a1a2e;
+  color: white;
+}
+
+header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+header nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+header button {
+  background: transparent;
+  color: white;
+  border: none;
+  opacity: 0.7;
+}
+
+header button:hover {
+  background: #33334d;
+  opacity: 1;
+}
+
+header button.active {
+  background: #33334d;
+  opacity: 1;
+}
+
+main {
+  max-width: 56rem;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  background: #4444aa;
+  color: white;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.prose {
+  background: white;
+  border-radius: 8px;
+  padding: 1.5rem 2rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  line-height: 1.6;
+}
+
+.prose h2 {
+  margin-top: 0;
+}
+
+.prose code {
+  background: #f0f0f2;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.wiki {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.wiki-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 0 0 12rem;
+}
+
+.wiki-nav button {
+  background: white;
+  color: #1a1a1a;
+  text-align: left;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.wiki-nav button.active {
+  background: #4444aa;
+  color: white;
+}
+
+.wiki article {
+  flex: 1;
+}
+
+@media (max-width: 40rem) {
+  .wiki {
+    flex-direction: column;
+  }
+  .wiki-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    flex: none;
+    width: 100%;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #16161d;
+    color: #e6e6e6;
+  }
+  .prose {
+    background: #22222b;
+  }
+  .prose code {
+    background: #16161d;
+  }
+  .wiki-nav button {
+    background: #22222b;
+    color: #e6e6e6;
+  }
+}

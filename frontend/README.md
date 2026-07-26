@@ -1,10 +1,19 @@
 # frontend
 
-Placeholder mínimo de frontend (Vite + Svelte, sin SvelteKit — solo se
-necesita un build estático de una SPA, sin SSR). `App.svelte` solo hace
-un `fetch('/api')` para validar que nginx sirve estos estáticos y
-proxyea `/api` al backend desde el mismo origen (ver
-[`nginx/nginx.conf`](../nginx/nginx.conf)) — reemplazar por la app real.
+Landing mínima (Vite + Svelte, sin SvelteKit — solo se necesita un
+build estático de una SPA, sin SSR), en el estilo de la página de
+bienvenida que traen otros frameworks al levantar el servicio (Rails,
+Django, Laravel): una sección **"Acerca de"** y una **Wiki** con varios
+temas (arquitectura, autenticación, generación de código, seguridad,
+despliegue) explicando cómo está armado el proyecto — sin login ni
+lógica de negocio. Reemplazar por la app real del proyecto cuando haga
+falta.
+
+- `src/routes/About.svelte` — resumen del proyecto y del stack.
+- `src/routes/Wiki.svelte` — los temas de la wiki (array `topics` en el
+  propio componente; agregar uno nuevo es agregar un elemento ahí).
+- `src/lib/router.js` — router mínimo por `location.hash`, sin
+  dependencia externa.
 
 ## Desarrollo local
 
@@ -14,10 +23,8 @@ npm install
 npm run dev
 ```
 
-`vite.config.js` ya proxyea `/api`, `/healthz` y `/docs` a
-`http://localhost:8080` (el backend corriendo suelto, sin nginx en el
-medio) para que `npm run dev` funcione sin tener que levantar todo el
-stack de Docker.
+No depende del backend para nada (contenido estático, sin `fetch`), así
+que `npm run dev` alcanza solo, sin levantar el resto del stack.
 
 ## Build de producción
 

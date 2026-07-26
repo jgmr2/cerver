@@ -118,10 +118,86 @@ services:
       dockerfile: nginx/Dockerfile
     ports:
       - "80:80"
+      # 443 queda comentado hasta activar TLS (ver nginx/TLS.md): no
+      # tiene sentido publicarlo mientras nginx.conf no tiene ningun
+      # "listen 443". Descomentar junto con el resto de los pasos de
+      # ese documento.
+      # - "443:443"
+    volumes:
+      # Vacios hasta que se corre el flujo de TLS de nginx/TLS.md -- ver
+      # el location /.well-known/acme-challenge/ en nginx/nginx.conf,
+      # que ya los sirve (sin efecto mientras esten vacios).
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
     depends_on:
       - backend
     restart: unless-stopped
 
+  # --- TLS (perfil "tls", no arranca con `docker compose up` normal) ---
+  # Uso completo, paso a paso, en nginx/TLS.md. Resumen: apuntar el DNS
+  # del cliente a esta instancia, correr
+  # `docker compose --profile tls run --rm certbot` para emitir el
+  # certificado, activar nginx/nginx-tls.conf.template (con el dominio
+  # real reemplazado), reconstruir nginx, y dejar "certbot-renew"
+  # corriendo para las renovaciones.
+  certbot:
+    image: certbot/certbot
+    profiles: ["tls"]
+    environment:
+      # Default vacio a proposito (no ":?required"): ese operador de
+      # docker-compose exige la variable al INTERPOLAR TODO el archivo,
+      # incluso para un `docker compose up` normal que ni siquiera toca
+      # el profile "tls" -- rompia el flujo de todos los dias. La
+      # validacion de que no esten vacias queda en el entrypoint de
+      # abajo, que solo corre cuando de verdad se invoca este servicio.
+      - DOMAIN=${DOMAIN:-}
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL:-}
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "[ -n \"$$DOMAIN\" ] && [ -n \"$$CERTBOT_EMAIL\" ] || {
+      echo 'falta DOMAIN y/o CERTBOT_EMAIL -- ver nginx/TLS.md' >&2; exit 1; };
+      certbot certonly --webroot -w /var/www/certbot
+      --email \"$$CERTBOT_EMAIL\" --agree-tos --no-eff-email
+      -d \"$$DOMAIN\" --non-interactive"
+
+  certbot-renew:
+    image: certbot/certbot
+    profiles: ["tls"]
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do
+      certbot renew --webroot -w /var/www/certbot --quiet;
+      sleep 12h;
+      done"
+    restart: unless-stopped
+
+  # Certificado AUTOFIRMADO para probar HTTPS en local sin un dominio
+  # real (navegadores lo van a marcar como no confiable, esperado) --
+  # mismo volumen y misma estructura de rutas
+  # (/etc/letsencrypt/live/<dominio>/...) que dejaria un certificado real
+  # de certbot, para que nginx-tls.conf.template funcione identico sin
+  # importar cual de los dos se uso. Ver nginx/TLS.md.
+  self-signed-cert:
+    image: alpine:latest
+    profiles: ["tls"]
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+    entrypoint: >
+      sh -c "apk add --no-cache openssl >/dev/null &&
+      mkdir -p /etc/letsencrypt/live/$$DOMAIN &&
+      openssl req -x509 -nodes -newkey rsa:2048 -days 365
+      -keyout /etc/letsencrypt/live/$$DOMAIN/privkey.pem
+      -out /etc/letsencrypt/live/$$DOMAIN/fullchain.pem
+      -subj /CN=$$DOMAIN"
+
 volumes:
   pgdata:
   pg_socket:
+  certbot_certs:
+  certbot_www:

@@ -47,15 +47,44 @@
 #define DB_READING  1
 #define DB_FLUSHING 2
 
+/* Tope defensivo de parametros que puede llevar una peticion encolada
+ * (ver has_params/param_copies en pending_req_t abajo). No es un limite
+ * real de ninguna tabla soportada -- ninguna generada por
+ * tools/dbfiller hoy pasa de una decena de columnas insertables -- es
+ * solo para no reservar un arreglo de tamano arbitrario por slot de la
+ * cola. Una peticion con mas parametros que esto simplemente no se
+ * encola (mismo efecto que cola llena, ver enqueue_pending_params). */
+#define PENDING_MAX_PARAMS 32
+
 /*
  * pending_req_t - una peticion en espera de conexion libre
  *
  * Campos:
  *   f             - file descriptor del cliente que espera el resultado
  *   s             - callback a invocar cuando la consulta termine
- *   sql_or_stmt   - texto SQL o nombre de prepared statement, segun 'prepared'
+ *   sql_or_stmt   - texto SQL o nombre de prepared statement, segun
+ *                   'prepared' -- siempre un puntero de vida estatica
+ *                   (literal de C o el nombre ya registrado del
+ *                   prepared statement), nunca hace falta copiarlo
  *   prepared      - 1 si sql_or_stmt es un nombre de prepared statement
  *   result_format - 0 = texto, 1 = binario
+ *   has_params    - 1 si esta peticion viene de
+ *                   db_query_prepared_params_async (tiene parametros
+ *                   reales en param_copies, no solo sql_or_stmt)
+ *   nParams       - cantidad de elementos validos en param_copies
+ *   param_copies  - copias (strdup) de los parametros originales, NULL
+ *                   en la posicion que corresponda a un parametro SQL
+ *                   NULL. Hacen falta copias -- no alcanza con guardar
+ *                   los punteros originales -- porque, a diferencia de
+ *                   sql_or_stmt, esos valores suelen venir de buffers
+ *                   de corta vida (el stack del handler que llamo, o
+ *                   route_params[], __thread y reciclado en el
+ *                   PROXIMO request que atienda este mismo hilo): para
+ *                   cuando esta peticion encolada se desencola, esos
+ *                   buffers ya pueden estar pisados o fuera de alcance.
+ *                   Se liberan en recycle_or_release_db, justo despues
+ *                   de pasarlos a PQsendQueryPrepared (que ya copio lo
+ *                   que necesitaba a su propio buffer interno).
  *   userdata      - puntero opaco a transportar hasta 's' (ver cb en db.h)
  */
 typedef struct {
@@ -64,6 +93,9 @@ typedef struct {
     const char *sql_or_stmt;
     unsigned char prepared;
     unsigned char result_format;
+    unsigned char has_params;
+    unsigned char nParams;
+    char *param_copies[PENDING_MAX_PARAMS];
     void *userdata;
 } pending_req_t;
 
@@ -296,7 +328,60 @@ static inline int enqueue_pending(int f, const char *sql_or_stmt, cb s, int prep
     pending_q[pending_tail].sql_or_stmt = sql_or_stmt;
     pending_q[pending_tail].prepared = (unsigned char)(prepared ? 1 : 0);
     pending_q[pending_tail].result_format = (unsigned char)((result_format != 0) ? 1 : 0);
+    pending_q[pending_tail].has_params = 0;
+    pending_q[pending_tail].nParams = 0;
     pending_q[pending_tail].userdata = userdata;
+
+    pending_tail = (pending_tail + 1) % g_db_pending_queue_size;
+    pending_count++;
+    return 1;
+}
+
+/*
+ * enqueue_pending_params - encola una peticion CON parametros cuando no
+ * hay conexiones libres (contraparte de enqueue_pending para
+ * db_query_prepared_params_async)
+ *
+ * Arma las copias (strdup) en un arreglo LOCAL antes de tocar el slot
+ * real de pending_q: si un strdup falla a mitad de camino (OOM), se
+ * liberan las copias ya hechas y se retorna 0 sin dejar el slot de la
+ * cola a medio escribir.
+ *
+ * Parametros: ver db_query_prepared_params_async en db.h
+ *
+ * Retorna:
+ *   1 si se encolo, 0 si la cola esta llena, nParams excede
+ *   PENDING_MAX_PARAMS, o no hay memoria para copiar los parametros
+ *   (en los tres casos, el caller debe avisarle al callback con
+ *   res=NULL, igual que con una cola llena comun).
+ */
+static inline int enqueue_pending_params(int f, const char *stmt, int nParams, const char *const *paramValues, int result_format, cb s, void *userdata) {
+    if (pending_count >= g_db_pending_queue_size) return 0;
+    if (nParams < 0 || nParams > PENDING_MAX_PARAMS) return 0;
+
+    char *copies[PENDING_MAX_PARAMS];
+    for (int i = 0; i < nParams; i++) {
+        if (!paramValues[i]) {
+            copies[i] = NULL;
+            continue;
+        }
+        copies[i] = strdup(paramValues[i]);
+        if (!copies[i]) {
+            for (int j = 0; j < i; j++) free(copies[j]);
+            return 0;
+        }
+    }
+
+    pending_req_t *slot = &pending_q[pending_tail];
+    slot->f = f;
+    slot->s = s;
+    slot->sql_or_stmt = stmt;
+    slot->prepared = 1;
+    slot->result_format = (unsigned char)((result_format != 0) ? 1 : 0);
+    slot->has_params = 1;
+    slot->nParams = (unsigned char)nParams;
+    for (int i = 0; i < nParams; i++) slot->param_copies[i] = copies[i];
+    slot->userdata = userdata;
 
     pending_tail = (pending_tail + 1) % g_db_pending_queue_size;
     pending_count++;
@@ -376,6 +461,11 @@ static inline int start_query_with_ctx(db_t *ctx, struct io_uring *r, const char
     return 1;
 }
 
+/* Declarada mas abajo (junto a db_query_prepared_params_async, su unica
+ * otra llamadora); recycle_or_release_db la necesita antes en el
+ * archivo para desencolar peticiones con parametros. */
+static inline int start_query_with_ctx_params(db_t *ctx, struct io_uring *r, const char *stmt, int nParams, const char *const *paramValues, int result_format);
+
 /*
  * recycle_or_release_db - reasigna una conexion libre o la devuelve al pool
  *
@@ -384,6 +474,11 @@ static inline int start_query_with_ctx(db_t *ctx, struct io_uring *r, const char
  * pool); si el envio de esa nueva consulta falla, se avisa al callback
  * con res=NULL antes de liberar. Si no hay nada pendiente, la conexion
  * vuelve a free_pool.
+ *
+ * Si la peticion desencolada tenia parametros (has_params, ver
+ * pending_req_t), sus copias (param_copies) se liberan aca mismo,
+ * apenas se usan para armar el envio -- ya cumplieron su unico
+ * proposito de sobrevivir el tiempo en cola.
  *
  * Parametros:
  *   ctx - conexion que acaba de quedar libre
@@ -394,9 +489,18 @@ static inline void recycle_or_release_db(db_t *ctx) {
         ctx->f = req.f;
         ctx->s = req.s;
         ctx->userdata = req.userdata;
-        if (start_query_with_ctx(ctx, ctx->r, req.sql_or_stmt, req.prepared, req.result_format)) {
-            return;
+
+        int started;
+        if (req.has_params) {
+            const char *paramValues[PENDING_MAX_PARAMS];
+            for (int i = 0; i < req.nParams; i++) paramValues[i] = req.param_copies[i];
+            started = start_query_with_ctx_params(ctx, ctx->r, req.sql_or_stmt, req.nParams, paramValues, req.result_format);
+            for (int i = 0; i < req.nParams; i++) free(req.param_copies[i]);
+        } else {
+            started = start_query_with_ctx(ctx, ctx->r, req.sql_or_stmt, req.prepared, req.result_format);
         }
+
+        if (started) return;
 
         if (ctx->s) (void)ctx->s(ctx->r, ctx->f, NULL, ctx->userdata);
     }
@@ -681,9 +785,9 @@ static inline int start_query_with_ctx_params(db_t *ctx, struct io_uring *r, con
  */
 void db_query_prepared_params_async(struct io_uring *r, int f, const char *stmt, int nParams, const char *const *paramValues, int result_format, cb s, void *userdata) {
     if (free_count <= 0) {
-        /* Sin cola para esta variante (ver el comentario en db.h): se
-         * avisa al callback de inmediato en vez de encolar. */
-        if (s) (void)s(r, f, NULL, userdata);
+        if (!enqueue_pending_params(f, stmt, nParams, paramValues, result_format, s, userdata) && s) {
+            (void)s(r, f, NULL, userdata);
+        }
         return;
     }
 
